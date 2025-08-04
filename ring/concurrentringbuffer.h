@@ -124,7 +124,7 @@ namespace thunder {
          *       value results in a memory leak.
          */
         [[nodiscard("Discarding leaks memory!")]]
-        constexpr std::expected<concurrentringbuffer, std::string> resize(int64_t bottom, int64_t top) const noexcept {
+        constexpr std::expected<concurrentringbuffer*, std::string> resize(int64_t bottom, int64_t top) const noexcept {
             try {
                 auto resizedBuffer = new concurrentringbuffer(std::bit_ceil(m_capacity + 1));
 
