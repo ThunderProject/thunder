@@ -44,7 +44,7 @@ namespace thunder {
         * @note Passing an index >= Size results in undefined behavior.
         */
         bool set(const size_t index, std::memory_order order) noexcept {
-            const auto mask = 1 << bit_offset(index);
+            const auto mask = make_mask(index);
             return m_data[block_index(index)].fetch_or(mask, order) & mask;
         }
 
@@ -72,7 +72,7 @@ namespace thunder {
          * @note Passing an index >= Size results in undefined behavior.
          */
         bool reset(const size_t index, std::memory_order order) noexcept {
-            const auto mask = 1 << bit_offset(index);
+            const auto mask = make_mask(index);
             return m_data[block_index(index)].fetch_and(~mask, order) & mask;
         }
 
@@ -85,8 +85,8 @@ namespace thunder {
         *
         * @note Passing an index >= Size results in undefined behavior.
         */
-        bool test(const size_t index, std::memory_order order) noexcept {
-            const auto mask = 1 << bit_offset(index);
+        [[nodiscard]] bool test(const size_t index, std::memory_order order) const noexcept {
+            const auto mask = make_mask(index);
             return m_data[block_index(index)].load(order) & mask;
         }
 
@@ -95,7 +95,7 @@ namespace thunder {
         *
         * @note Passing an index >= Size results in undefined behavior.
         */
-        [[nodiscard]] bool get(size_t index, std::memory_order order) const noexcept {
+        [[nodiscard]] bool get(const size_t index, std::memory_order order) const noexcept {
             return test(index, order);
         }
 
@@ -106,7 +106,7 @@ namespace thunder {
          *
          * @note Passing an index >= Size results in undefined behavior.
          */
-        bool operator[](size_t index) const noexcept {
+        bool operator[](const size_t index) const noexcept {
             return test(index, std::memory_order_seq_cst);
         }
 
@@ -125,6 +125,10 @@ namespace thunder {
         // Returns the offset of the bit within its atomic block.
         static constexpr size_t bit_offset(const size_t bit) noexcept {
             return bit % m_bitsPerBlock;
+        }
+
+        static constexpr lockFreeBlockType::value_type make_mask(const size_t offset) noexcept {
+            return static_cast<lockFreeBlockType::value_type>(1) << offset;
         }
 
         static constexpr size_t m_bitsPerBlock = std::numeric_limits<lockFreeBlockType::value_type>::digits;
