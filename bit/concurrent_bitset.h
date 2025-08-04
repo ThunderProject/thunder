@@ -95,7 +95,7 @@ namespace thunder {
         *
         * @note Passing an index >= Size results in undefined behavior.
         */
-        [[nodiscard]] bool get(const size_t index, std::memory_order order) const noexcept {
+        [[nodiscard]] bool get(const size_t index, const std::memory_order order) const noexcept {
             return test(index, order);
         }
 
