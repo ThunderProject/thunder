@@ -2,7 +2,7 @@
 #include <new>
 #include <vector>
 
-#include "reclamator.h"
+#include "reclaimer.h"
 #include "ring/concurrentringbuffer.h"
 
 namespace thunder {
