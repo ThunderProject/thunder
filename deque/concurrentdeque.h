@@ -31,7 +31,7 @@ namespace thunder {
     };
 
     template<reclamation_technique Technique, typename Buffer>
-    using select_reclamation_t = typename reclaimer_selector<Technique, Buffer>::type;
+    using reclaimer_selector_t = typename reclaimer_selector<Technique, Buffer>::type;
 
     enum class PopFailureReason {
         FailedRace,
@@ -49,7 +49,7 @@ namespace thunder {
     };
 
     /**
-    * @brief A lock-free, concurrent, dynamically resizable worker queue.
+    * @brief A lock-free, concurrent work-stealing deque with configurable memory management.
     *
     * This is a FIFO or LIFO queue that is owned by a single thread, but other threads may steal
     * tasks from it.
@@ -57,15 +57,20 @@ namespace thunder {
     * Only the owner thread is allowed to call `push()` and `pop()`. Multiple consumer threads
     * may concurrently call `steal()`
     *
-    * Internally, it uses a lock-free ring buffer.
-    * The buffer grows dynamically and supports concurrent access with minimal contention.
-    *
+    * The queue internally uses a lock-free ring buffer, and its resizing behavior depends on the selected
+     * reclamation strategy:
+     * - `reclamation_technique::none`: overwrites entries when full. — fastest option, but may cause data loss.
+     * - `reclamation_technique::bounded`: fails `push()` when full. — equally fast, but ensures no overwrites.
+     * - `reclamation_technique::deferred`: grows dynamically and reclaims memory on destruction. — safe, but incurs copy overhead during resize.
+     *
     * @tparam T The type of elements stored in the deque. Must be trivially destructible.
+    * @tparam flavor Determines whether the owner pops items in FIFO or LIFO order.
+    * @tparam Technique The memory reclamation policy to use when the buffer is full.
     */
     template<
         class T,
         Flavor flavor = Flavor::Lifo,
-        reclamation_technique Technique = reclamation_technique::none
+        reclamation_technique Technique = reclamation_technique::deferred
     >
     class concurrent_deque {
         static_assert(
@@ -142,9 +147,11 @@ namespace thunder {
         /**
          * @brief Pushes an item onto the bottom of the deque.
          *
-         * Adds a new element to the bottom of the queue. This method must be called only by the
-         * owning (producer) thread. If the current buffer is full, it attempts to resize; if that
-         * fails, the operation returns false.
+         * Adds a new element to the bottom of the queue. This method must be called only by the owning (producer) thread.
+         * Behavior on buffer full depends on the reclamation technique:
+         * - `none`: overwrites oldest entries
+         * - `bounded`: fails without modifying the buffer
+         * - `deferred`: attempts to resize; fails if allocation fails
          *
          * @param item The item to push.
          * @return true if the item was successfully pushed; false if resizing failed.
@@ -292,7 +299,7 @@ namespace thunder {
         }
 
         using buffer_type = concurrentringbuffer<T>;
-        using reclaimer = reclaimer_selector<Technique, buffer_type>;
+        using reclaimer = reclaimer_selector_t<Technique, buffer_type>;
 
         alignas(std::hardware_destructive_interference_size) std::atomic_ptrdiff_t m_top{0};
         alignas(std::hardware_destructive_interference_size) std::atomic_ptrdiff_t m_bottom{0};
