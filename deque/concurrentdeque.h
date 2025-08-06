@@ -1,9 +1,38 @@
 #pragma once
 #include <new>
 #include <vector>
+
+#include "reclamator.h"
 #include "ring/concurrentringbuffer.h"
 
 namespace thunder {
+    enum class reclamation_technique {
+        none, // does not resize the buffer, simply overwrites the buffer when full
+        bounded, // does not resize the buffer, push will fail when buffer is full
+        deferred, // resizes the buffer and reclaims the memory when the concurrent_deque is destroyed
+    };
+
+    template<reclamation_technique Technique, class Buffer>
+    struct reclaimer_selector;
+
+    template<class Buffer>
+    struct reclaimer_selector<reclamation_technique::none, Buffer> {
+        using type = null_reclaimer<Buffer>;
+    };
+
+    template<typename Buffer>
+    struct reclaimer_selector<reclamation_technique::bounded, Buffer> {
+        using type = bounded_reclaimer<Buffer>;
+    };
+
+    template<typename Buffer>
+    struct reclaimer_selector<reclamation_technique::deferred, Buffer> {
+        using type = deferred_reclaimer<Buffer>;
+    };
+
+    template<reclamation_technique Technique, typename Buffer>
+    using select_reclamation_t = typename reclaimer_selector<Technique, Buffer>::type;
+
     enum class PopFailureReason {
         FailedRace,
         EmptyQueue
@@ -33,7 +62,11 @@ namespace thunder {
     *
     * @tparam T The type of elements stored in the deque. Must be trivially destructible.
     */
-    template<class T>
+    template<
+        class T,
+        Flavor flavor = Flavor::Lifo,
+        reclamation_technique Technique = reclamation_technique::none
+    >
     class concurrent_deque {
         static_assert(
             std::is_trivially_destructible_v<T>,
@@ -48,9 +81,7 @@ namespace thunder {
         explicit concurrent_deque(ptrdiff_t capacity = 1024)
             :
             m_buffer(new concurrentringbuffer<T>(capacity))
-        {
-            m_garbage.reserve(64);
-        }
+        {}
 
         /**
          * @brief Copy constructor is deleted.
@@ -130,16 +161,26 @@ namespace thunder {
             // std::memory_order_relaxed is sufficient because m_buffer is only replaced by the owner thread
             auto buffer = m_buffer.load(std::memory_order_relaxed);
 
-            if (buffer->capacity() <  (bottom - top) + 1) {
-                auto bigger = buffer->resize(bottom, top);
-                if (!bigger.has_value()) {
-                    return false;
+            if constexpr (Technique != reclamation_technique::none) {
+                if (needs_resize(buffer, bottom, top)) [[unlikely]] {
+                    if constexpr (Technique == reclamation_technique::bounded) {
+                        // fail fast — cannot grow or overwrite
+                        return false;
+                    }
+
+                    auto bigger = buffer->resize(bottom, top);
+
+                    // failed to resize, return false to indicate push failure
+                    if (!bigger.has_value()) {
+                        return false;
+                    }
+
+                    // replace buffer with the new resized one and collect the old buffer for deferred reclamation
+                    m_reclaimer.collect(std::exchange(buffer, bigger.value()));
+
+                    // std::memory_order_relaxed is sufficient because only the owner thread writes m_buffer, so no synchronization needed.
+                    m_buffer.store(buffer, std::memory_order_relaxed);
                 }
-
-                m_garbage.emplace_back(std::exchange(buffer, bigger));
-
-                // std::memory_order_relaxed is sufficient because only the owner thread writes m_buffer, so no synchronization needed.
-                m_buffer.store(buffer, std::memory_order_relaxed);
             }
 
             buffer->write_at(bottom, std::move(item));
@@ -151,7 +192,7 @@ namespace thunder {
             return true;
         }
 
-        /**
+         /**
          * @brief Removes and returns an item from the bottom of the deque.
          *
          * This method must only be called by the owning (producer) thread.
@@ -243,12 +284,19 @@ namespace thunder {
             }
 
             // The queue is empty from the stealing thread’s perspective.
-            return std::unexpected{ PopFailureReason::EmptyQueue };
+            return std::unexpected{ StealFailureReason::EmptyQueue };
         }
     private:
+        [[nodiscard]] static bool needs_resize(const concurrentringbuffer<T>* buffer, const std::atomic_ptrdiff_t& bottom, const std::atomic_ptrdiff_t& top) noexcept {
+            return buffer->capacity() < (bottom - top) + 1;
+        }
+
+        using buffer_type = concurrentringbuffer<T>;
+        using reclaimer = reclaimer_selector<Technique, buffer_type>;
+
         alignas(std::hardware_destructive_interference_size) std::atomic_ptrdiff_t m_top{0};
         alignas(std::hardware_destructive_interference_size) std::atomic_ptrdiff_t m_bottom{0};
-        alignas(std::hardware_destructive_interference_size) std::atomic<concurrentringbuffer<T>*> m_buffer{};
-        std::vector<std::unique_ptr<concurrentringbuffer<T>>> m_garbage;
+        alignas(std::hardware_destructive_interference_size) std::atomic<buffer_type*> m_buffer{};
+        reclaimer<buffer_type> m_reclaimer;
     };
 }
