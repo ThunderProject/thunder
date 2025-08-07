@@ -53,8 +53,7 @@ namespace thunder {
     *
     * The queue internally uses a lock-free ring buffer, and its resizing behavior depends on the selected
      * reclamation strategy:
-     * - `reclamation_technique::none`: overwrites entries when full. — fastest option, but may cause data loss.
-     * - `reclamation_technique::bounded`: fails `push()` when full. — equally fast, but ensures no overwrites.
+     * - `reclamation_technique::bounded`: fails `push()` when full. — fastest option, but push will fail if buffer is full.
      * - `reclamation_technique::deferred`: grows dynamically and reclaims memory on destruction. — safe, but incurs copy overhead during resize.
      *
     * @tparam T The type of elements stored in the deque. Must be trivially destructible.
