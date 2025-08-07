@@ -48,10 +48,11 @@ namespace thunder {
         */
         void park() {
             // Fast path: try to consume the token without blocking
-            if (!m_token.try_acquire()) {
-                // block until unpark is called
-                m_token.acquire();
+            if (m_token.try_acquire()) {
+                return;
             }
+            // block until unpark is called
+            m_token.acquire();
         }
 
         /**
@@ -73,11 +74,11 @@ namespace thunder {
         requires details::is_duration<Rep, Period>
         [[nodiscard]] bool park_for(const std::chrono::duration<Rep, Period>& timeout) {
             // Fast path: try to consume the token without blocking
-            if (!m_token.try_acquire()) {
-                return false;
+            if (m_token.try_acquire()) {
+                return true;
             }
 
-            // If the timeout is zero, then there is no need to actually block.
+            // If the timeout is zero or negative, then there is no need to actually block.
             if (timeout <= std::chrono::duration<Rep, Period>::zero()) {
                 return false;
             }
@@ -104,8 +105,8 @@ namespace thunder {
         requires std::chrono::is_clock_v<Clock>
         [[nodiscard]] bool park_until(const std::chrono::time_point<Clock, Duration>& timepoint) {
             // Fast path: try to consume the token without blocking
-            if (!m_token.try_acquire()) {
-                return false;
+            if (m_token.try_acquire()) {
+                return true;
             }
 
             // block until unpark is called or the timepoint has been passed
