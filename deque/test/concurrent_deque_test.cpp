@@ -163,14 +163,14 @@ TEST_CASE("Flavor correctness: LIFO vs FIFO", "[concurrent_deque][flavor]") {
 }
 
 TEST_CASE("Test with many concurrent stealers", "[concurrent_deque][concurrency]") {
-    concurrent_deque<int, reclamation_technique::bounded> deque(64);
+    concurrent_deque<int, reclamation_technique::bounded> deque(200);
 
-    for (int i = 0; i < 50; ++i) {
+    for (int i = 0; i < 200; ++i) {
         REQUIRE(deque.push(i));
     }
 
     std::atomic total_stolen = 0;
-    constexpr int num_threads = 8;
+    constexpr int num_threads = 24;
 
     std::vector<std::thread> threads;
     for (int t = 0; t < num_threads; ++t) {
@@ -187,7 +187,7 @@ TEST_CASE("Test with many concurrent stealers", "[concurrent_deque][concurrency]
     }
 
     for (auto& t : threads) t.join();
-    REQUIRE(total_stolen == 50);
+    REQUIRE(total_stolen == 200);
 }
 
 TEST_CASE("Deferred deque resizes multiple times", "[concurrent_deque][deferred]") {
