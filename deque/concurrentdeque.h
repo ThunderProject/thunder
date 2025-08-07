@@ -327,13 +327,19 @@ namespace thunder {
         *         - On failure: an error reason indicating the deque was empty.
         */
         std::expected<T, PopFailureReason> pop_top() noexcept {
-             auto bottom = m_bottom.load(std::memory_order_relaxed);
+             // std::memory_order_relaxed is sufficient because m_bottom is only written by the owner thread
+             const auto bottom = m_bottom.load(std::memory_order_relaxed);
+
+             // Use std::memory_order_seq_cst to enforce a total order among top updates
              auto top = m_top.fetch_add(1, std::memory_order_seq_cst);
 
+
              if (bottom - (top + 1) < 0) {
+                 // std::memory_order_relaxed is sufficient because there is no ordering w.r.t other read/writes
                  m_top.store(top, std::memory_order_relaxed);
                  return std::unexpected{ PopFailureReason::EmptyQueue };
              }
+             // std::memory_order_relaxed is sufficient because there is no ordering w.r.t other read/writes
              return m_buffer.load(std::memory_order_relaxed)->read_at(top);
          }
 
