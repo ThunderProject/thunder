@@ -64,13 +64,13 @@ namespace thunder {
      * - `reclamation_technique::deferred`: grows dynamically and reclaims memory on destruction. — safe, but incurs copy overhead during resize.
      *
     * @tparam T The type of elements stored in the deque. Must be trivially destructible.
-    * @tparam flavor Determines whether the owner pops items in FIFO or LIFO order.
     * @tparam Technique The memory reclamation policy to use when the buffer is full.
+    * @tparam flavor Determines whether the owner pops items in FIFO or LIFO order.
     */
     template<
         class T,
-        Flavor flavor = Flavor::Lifo,
-        reclamation_technique Technique = reclamation_technique::deferred
+        reclamation_technique Technique = reclamation_technique::deferred,
+        Flavor flavor = Flavor::Lifo
     >
     class concurrent_deque {
         static_assert(
@@ -199,69 +199,46 @@ namespace thunder {
             return true;
         }
 
-         /**
-         * @brief Removes and returns an item from the bottom of the deque.
-         *
-         * This method must only be called by the owning (producer) thread.
-         * If the deque is not empty, it removes and returns the item at the bottom.
-         * If the deque appears empty or the pop operation loses a race to a concurrent
-         * steal from another thread, it fails with an appropriate reason.
-         *
-         * @return std::expected<T, PopFailureReason>
-         *         - On success: the removed item.
-         *         - On failure: an error reason indicating either an empty deque or a failed contention.
-         */
+        /**
+        * @brief Removes and returns an item from the deque, based on the configured flavor.
+        *
+        * Dispatches to either `pop_top()` or `pop_bottom()` depending on the `Flavor` template parameter.
+        *
+        * - In `Flavor::Lifo`, the item is removed from the bottom.
+        * - In `Flavor::Fifo`, the item is removed from the top.
+        *
+        * This method must only be called by the owning (producer) thread.
+        *
+        * @return std::expected<T, PopFailureReason>
+        *         - On success: the removed item.
+        *         - On failure: an error reason indicating either an empty deque or a failed contention.
+        */
         std::expected<T, PopFailureReason> pop() noexcept {
-            // std::memory_order_relaxed is sufficient because m_bottom is only written by the owner thread
-            const auto bottom = m_bottom.load(std::memory_order_relaxed) -1;
-            const auto buffer = m_buffer.load(std::memory_order_relaxed);
-
-            // Temporarily decrement bottom — relaxed store is sufficient, as no ordering is required yet.
-            m_bottom.store(bottom, std::memory_order_relaxed);
-
-            // Issue a full memory fence to enforce a sequentially consistent view.
-            // This ensures visibility of all prior writes (e.g., by producers) before evaluating queue state.
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-
-            // Load m_top with relaxed ordering; correctness is ensured by the preceding fence and a later CAS.
-            auto top = m_top.load(std::memory_order_relaxed);
-
-            if (top <= bottom) {
-                // If this is the last item, we must win a race to pop it.
-                if (top == bottom) {
-                    // Attempt to claim the slot by advancing `top` via CAS.
-                    // Use std::memory_order_seq_cst to establish a total order at this synchronization point.
-                    // On failure, relaxed ordering suffices, as no synchronization is required when the CAS fails.
-                    // A failed CAS indicates that another consumer acquired the slot first.
-                    if(!m_top.compare_exchange_strong(top, top + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
-                        // Restore bottom and report failure
-                        m_bottom.store(bottom + 1, std::memory_order_relaxed);
-                        return std::unexpected{ PopFailureReason::FailedRace };
-                    }
-                    // restore bottom if we won the race
-                    m_bottom.store(bottom + 1, std::memory_order_relaxed);
-                }
-                return std::move(buffer->read_at(bottom));
+            if (empty()) {
+                return std::unexpected{ StealFailureReason::EmptyQueue };
             }
-
-            // std::memory_order_relaxed is sufficient because we're not publishing any data.
-            // No concurrent writes to m_bottom is possible
-            m_bottom.store(bottom + 1, std::memory_order_relaxed);
-            return std::unexpected{ PopFailureReason::EmptyQueue };
+            if constexpr (flavor == Flavor::Fifo) {
+                return pop_top();
+            }
+            else if constexpr (flavor == Flavor::Lifo) {
+                return pop_bottom();
+            }
+            else {
+                std::unreachable();
+            }
         }
 
         /**
-          * @brief Attempts to steal an item from the top of the deque.
-          *
-          * This method can be called concurrently by multiple threads.
-          * If the deque is not empty, it attempts to claim and return the item at the top.
-          * If successful, it returns the stolen item; otherwise, it returns a failure reason.
-          *
-          * @return std::expected<T, StealFailureReason>
-          *         - On success: the stolen item.
-          *         - On failure: an error reason indicating either an empty deque or a failed race.
-          *
-          */
+        * @brief Attempts to steal an item from the top of the deque.
+        *
+        * This method can be called concurrently by multiple threads.
+        * If the deque is not empty, it attempts to claim and return the item at the top.
+        * If successful, it returns the stolen item; otherwise, it returns a failure reason.
+        *
+        * @return std::expected<T, StealFailureReason>
+        *         - On success: the stolen item.
+        *         - On failure: an error reason indicating either an empty deque or a failed race.
+        */
         std::expected<T, StealFailureReason> steal() noexcept {
             // Load the current top index. Note: A Key component of this algorithm is that m_top is read before m_bottom here
             auto top = m_top.load(std::memory_order_acquire);
@@ -294,6 +271,82 @@ namespace thunder {
             return std::unexpected{ StealFailureReason::EmptyQueue };
         }
     private:
+        /**
+        * @brief Removes and returns an item from the bottom of the deque.
+        *
+        * This method must only be called by the owning (producer) thread.
+        * If the deque is not empty, it removes and returns the item at the bottom.
+        * If the deque appears empty or the pop operation loses a race to a concurrent
+        * steal from another thread, it fails with an appropriate reason.
+        *
+        * @return std::expected<T, PopFailureReason>
+        *         - On success: the removed item.
+        *         - On failure: an error reason indicating either an empty deque or a failed contention.
+        */
+         std::expected<T, PopFailureReason> pop_bottom() noexcept {
+            // std::memory_order_relaxed is sufficient because m_bottom is only written by the owner thread
+            const auto bottom = m_bottom.load(std::memory_order_relaxed) -1;
+            const auto buffer = m_buffer.load(std::memory_order_relaxed);
+
+            // Temporarily decrement bottom — relaxed store is sufficient, as no ordering is required yet.
+            m_bottom.store(bottom, std::memory_order_relaxed);
+
+            // Issue a full memory fence to enforce a sequentially consistent view.
+            // This ensures visibility of all prior writes (e.g., by producers) before evaluating queue state.
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+
+            // Load m_top with relaxed ordering; correctness is ensured by the preceding fence and a later CAS.
+            auto top = m_top.load(std::memory_order_relaxed);
+
+            // Compute the length after the bottom index was decremented
+            const auto length = bottom - top;
+            if (length < 0) {
+                //the queue is empty. Restore bottom and report failure
+                // std::memory_order_relaxed is sufficient because we're not publishing any data.
+                m_bottom.store(bottom + 1, std::memory_order_relaxed);
+                return std::unexpected{ PopFailureReason::EmptyQueue };
+            }
+
+            // We are trying to retrieve the last item in the queue. We must win a race with any stealers to pop it.
+            if (length == 0) {
+                // Attempt to claim the slot by advancing `top` via CAS.
+                // Use std::memory_order_seq_cst to establish a total order at this synchronization point.
+                // On failure, relaxed ordering suffices, as no synchronization is required when the CAS fails.
+                // A failed CAS indicates that another consumer acquired the slot first.
+                if(!m_top.compare_exchange_strong(top, top + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+                    // Restore bottom and report failure
+                    m_bottom.store(bottom + 1, std::memory_order_relaxed);
+                    return std::unexpected{ PopFailureReason::FailedRace };
+                }
+                // restore bottom if we won the race
+                m_bottom.store(bottom + 1, std::memory_order_relaxed);
+            }
+            return std::move(buffer->read_at(bottom));
+        }
+
+        /**
+        * @brief Removes and returns an item from the top of the deque.
+        *
+        * Only the owning (producer) thread may call this method.
+        * It atomically increments the top index to claim the item.
+        *
+        * This method does not require contention handling with stealers, but may fail if the deque is empty.
+        *
+        * @return std::expected<T, PopFailureReason>
+        *         - On success: the removed item.
+        *         - On failure: an error reason indicating the deque was empty.
+        */
+        std::expected<T, PopFailureReason> pop_top() noexcept {
+             auto bottom = m_bottom.load(std::memory_order_relaxed);
+             auto top = m_top.fetch_add(1, std::memory_order_seq_cst);
+
+             if (bottom - (top + 1) < 0) {
+                 m_top.store(top, std::memory_order_relaxed);
+                 return std::unexpected{ PopFailureReason::EmptyQueue };
+             }
+             return m_buffer.load(std::memory_order_relaxed)->read_at(top);
+         }
+
         [[nodiscard]] static bool needs_resize(const concurrentringbuffer<T>* buffer, const std::atomic_ptrdiff_t& bottom, const std::atomic_ptrdiff_t& top) noexcept {
             return buffer->capacity() < (bottom - top) + 1;
         }
