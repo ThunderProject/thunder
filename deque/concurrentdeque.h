@@ -7,18 +7,12 @@
 
 namespace thunder {
     enum class reclamation_technique {
-        none, // does not resize the buffer, simply overwrites the buffer when full
         bounded, // does not resize the buffer, push will fail when buffer is full
         deferred, // resizes the buffer and reclaims the memory when the concurrent_deque is destroyed
     };
 
     template<reclamation_technique Technique, class Buffer>
     struct reclaimer_selector;
-
-    template<class Buffer>
-    struct reclaimer_selector<reclamation_technique::none, Buffer> {
-        using type = null_reclaimer<Buffer>;
-    };
 
     template<typename Buffer>
     struct reclaimer_selector<reclamation_technique::bounded, Buffer> {
@@ -149,14 +143,13 @@ namespace thunder {
          *
          * Adds a new element to the bottom of the queue. This method must be called only by the owning (producer) thread.
          * Behavior on buffer full depends on the reclamation technique:
-         * - `none`: overwrites oldest entries
          * - `bounded`: fails without modifying the buffer
          * - `deferred`: attempts to resize; fails if allocation fails
          *
          * @param item The item to push.
          * @return true if the item was successfully pushed; false if resizing failed.
          */
-        bool push(T&& item) noexcept {
+        bool push(const T& item) noexcept {
             // std::memory_order_relaxed is sufficient because this load doesn't acquire anything from
             // another thread. m_bottom is only written in pop() which cannot be concurrent with push()
             auto bottom = m_bottom.load(std::memory_order_relaxed);
@@ -168,26 +161,24 @@ namespace thunder {
             // std::memory_order_relaxed is sufficient because m_buffer is only replaced by the owner thread
             auto buffer = m_buffer.load(std::memory_order_relaxed);
 
-            if constexpr (Technique != reclamation_technique::none) {
-                if (needs_resize(buffer, bottom, top)) [[unlikely]] {
-                    if constexpr (Technique == reclamation_technique::bounded) {
-                        // fail fast — cannot grow or overwrite
-                        return false;
-                    }
-
-                    auto bigger = buffer->resize(bottom, top);
-
-                    // failed to resize, return false to indicate push failure
-                    if (!bigger.has_value()) {
-                        return false;
-                    }
-
-                    // replace buffer with the new resized one and collect the old buffer for deferred reclamation
-                    m_reclaimer.collect(std::exchange(buffer, bigger.value()));
-
-                    // std::memory_order_relaxed is sufficient because only the owner thread writes m_buffer, so no synchronization needed.
-                    m_buffer.store(buffer, std::memory_order_relaxed);
+            if (needs_resize(buffer, bottom, top)) [[unlikely]] {
+                if constexpr (Technique == reclamation_technique::bounded) {
+                    // fail fast — cannot grow or overwrite
+                    return false;
                 }
+
+                auto bigger = buffer->resize(bottom, top);
+
+                // failed to resize, return false to indicate push failure
+                if (!bigger.has_value()) {
+                    return false;
+                }
+
+                // replace buffer with the new resized one and collect the old buffer for deferred reclamation
+                m_reclaimer.collect(std::exchange(buffer, bigger.value()));
+
+                // std::memory_order_relaxed is sufficient because only the owner thread writes m_buffer, so no synchronization needed.
+                m_buffer.store(buffer, std::memory_order_relaxed);
             }
 
             buffer->write_at(bottom, std::move(item));
@@ -215,7 +206,7 @@ namespace thunder {
         */
         std::expected<T, PopFailureReason> pop() noexcept {
             if (empty()) {
-                return std::unexpected{ StealFailureReason::EmptyQueue };
+                return std::unexpected{ PopFailureReason::EmptyQueue };
             }
             if constexpr (flavor == Flavor::Fifo) {
                 return pop_top();
@@ -357,6 +348,6 @@ namespace thunder {
         alignas(std::hardware_destructive_interference_size) std::atomic_ptrdiff_t m_top{0};
         alignas(std::hardware_destructive_interference_size) std::atomic_ptrdiff_t m_bottom{0};
         alignas(std::hardware_destructive_interference_size) std::atomic<buffer_type*> m_buffer{};
-        reclaimer<buffer_type> m_reclaimer;
+        reclaimer m_reclaimer;
     };
 }

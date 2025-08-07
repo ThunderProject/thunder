@@ -6,12 +6,6 @@ namespace thunder {
     concept buffer_type = !std::is_array_v<T>;
 
     template<buffer_type buffer>
-    class null_reclaimer {
-    public:
-        void collect(buffer* buf) noexcept {}
-    };
-
-    template<buffer_type buffer>
     class bounded_reclaimer {
     public:
         void collect(buffer* buf) noexcept {}
