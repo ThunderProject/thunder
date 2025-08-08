@@ -6,7 +6,6 @@
 
 using namespace thunder;
 
-//heap_buffer tests
 TEST_CASE("queue basic push/pop", "[queue]") {
     spsc::queue<int32_t> queue(4);
 
@@ -87,7 +86,6 @@ TEST_CASE("SPSC producer/consumer threaded test", "[queue][threads]") {
     }
 }
 
-//stack_buffer tests
 struct MoveOnly {
     int v{0};
     MoveOnly() = default;
@@ -206,4 +204,84 @@ TEST_CASE("SPSC producer/consumer threaded test (stack)", "[stack][threads][spsc
     for (std::size_t i = 0; i < N; ++i) {
         REQUIRE(consumed[i] == i);
     }
+}
+
+
+TEST_CASE("capacity() reports logical capacity", "[capacity]") {
+    const spsc::queue<int32_t> queue(8);
+    REQUIRE(queue.capacity() == 8);
+
+    spsc::queue<int32_t, 0> queue2(1);
+    REQUIRE(queue2.capacity() == 1);
+}
+
+TEST_CASE("empty()/size() initial state", "[size][empty]") {
+    const spsc::queue<int32_t> queue(4);
+    REQUIRE(queue.capacity() == 4);
+    REQUIRE(queue.empty());
+    REQUIRE(queue.size() == 0);
+}
+
+
+TEST_CASE("empty()/size() after pushes and pops", "[size][empty]") {
+    spsc::queue<int32_t> queue(4);
+
+    // push up to full
+    REQUIRE(queue.empty());
+    REQUIRE(queue.size() == 0);
+
+    REQUIRE(queue.try_push(1));
+    REQUIRE_FALSE(queue.empty());
+    REQUIRE(queue.size() == 1);
+
+    REQUIRE(queue.try_push(2));
+    REQUIRE(queue.size() == 2);
+
+    REQUIRE(queue.try_push(3));
+    REQUIRE(queue.size() == 3);
+
+    REQUIRE(queue.try_push(4));
+    REQUIRE(queue.size() == 4);
+
+    // Next push should fail (logical capacity = 4)
+    REQUIRE_FALSE(queue.try_push(5));
+    REQUIRE(queue.size() == 4);
+
+    // pop one, size drops
+    auto v = queue.try_pop();
+    REQUIRE(v.has_value());
+    REQUIRE(v.value() == 1);
+    REQUIRE(queue.size() == 3);
+    REQUIRE_FALSE(queue.empty());
+
+    // push succeeds again
+    REQUIRE(queue.try_push(4));
+    REQUIRE(queue.size() == 4);
+}
+
+TEST_CASE("wrap-around preserves size()/empty()", "[wrap][size][empty]") {
+    // Small capacity to force wrap quickly
+    spsc::queue<int32_t> queue(3);
+
+    // Fill to max resident (which is capacity)
+    REQUIRE(queue.try_push(10));
+    REQUIRE(queue.try_push(20));
+    REQUIRE(queue.try_push(30));
+    REQUIRE(queue.size() == 3);
+    REQUIRE_FALSE(queue.try_push(40)); // full
+
+    // Pop one and push one to wrap
+    REQUIRE(queue.try_pop().value() == 10);
+    REQUIRE(queue.size() == 2);
+
+    REQUIRE(queue.try_push(40)); // should wrap internally
+    REQUIRE(queue.size() == 3);
+    REQUIRE_FALSE(queue.empty());
+
+    // Drain and check empty at the end
+    REQUIRE(queue.try_pop().value() == 20);
+    REQUIRE(queue.try_pop().value() == 30);
+    REQUIRE(queue.try_pop().value() == 40);
+    REQUIRE(queue.empty());
+    REQUIRE(queue.size() == 0);
 }

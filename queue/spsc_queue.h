@@ -146,6 +146,40 @@ namespace thunder::spsc {
         * @return The item if available; otherwise \c std::nullopt.
         */
         [[nodiscard]] std::optional<T> try_pop() { return m_inner.try_pop(); }
+
+        /**
+        * @brief Returns current size (approximate, due to concurrency).
+        *
+        * Computes the difference between the writeIndex and readIndex.
+        *
+        * @return The number of elements logically in the deque
+        */
+        [[nodiscard]] std::size_t size() const noexcept {
+            // relaxed is safe here because ordering isn't needed for approximate size.
+            const auto writeIndex = m_writer.writeIndex.load(std::memory_order_relaxed);
+            const auto readIndex = m_reader.readIndex.load(std::memory_order_relaxed);
+
+            if (writeIndex >= readIndex) {
+                return writeIndex - readIndex;
+            }
+            return base::capacity - readIndex + writeIndex;
+        }
+
+        /**
+        * @brief Checks if the queue is empty (approximate, due to concurrency).
+        * @return true if the deque appears empty; false otherwise.
+        */
+        [[nodiscard]] bool empty() const noexcept {
+            // relaxed is safe here because ordering isn't needed for approximate emptiness.
+            return m_writer.writeIndex.load(std::memory_order_relaxed) == m_reader.readIndex.load(std::memory_order_relaxed);
+        }
+
+        /**
+         * @brief Returns the current capacity of the queue.
+         *
+         * @return The capacity of the queue.
+         */
+        [[nodiscard]] std::size_t capacity() const noexcept { return base::capacity -1; }
     private:
         class inner {
         public:
