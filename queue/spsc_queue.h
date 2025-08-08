@@ -93,6 +93,18 @@ namespace thunder::spsc {
             void force_push(U&& item) {
                 const auto writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_relaxed);
                 const auto nextWriteIndex = (writeIndex == m_queue->base::capacity - 1) ? 0 : writeIndex + 1;
+
+                if (nextWriteIndex == m_queue->m_writer.readIndex) {
+                    m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+
+                    if (nextWriteIndex == m_queue->m_writer.readIndex) {
+                        const auto nextReadIndex = m_queue->m_writer.readIndex ==m_queue->base::capacity - 1 ? 0 : m_queue->m_writer.readIndex + 1;
+
+                        m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
+                        m_queue->m_writer.readIndex = nextReadIndex;
+                    }
+                }
+
                 m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<U>(item);
                 m_queue->m_writer.writeIndex.store(nextWriteIndex, std::memory_order_release);
             }

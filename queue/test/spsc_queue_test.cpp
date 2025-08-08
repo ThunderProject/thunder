@@ -86,13 +86,13 @@ TEST_CASE("SPSC producer/consumer threaded test", "[queue][threads]") {
     }
 }
 
-// TEST_CASE("queue force_push overwrites", "[queue]") {
-//     spsc::queue<int32_t> queue(2);
-//
-//     queue.push(1);
-//     queue.push(2);
-//     queue.force_push(99); // overwrites oldest (1)
-//
-//     REQUIRE(queue.pop() == 2);
-//     REQUIRE(queue.pop() == 99);
-// }
+TEST_CASE("queue force_push overwrites", "[queue]") {
+    spsc::queue<int32_t> queue(2);
+
+    queue.push(1);
+    queue.push(2);
+    queue.force_push(99); // overwrites oldest (1)
+
+    REQUIRE(queue.pop() == 2);
+    REQUIRE(queue.pop() == 99);
+}
