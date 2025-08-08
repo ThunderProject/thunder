@@ -4,18 +4,15 @@
 #include <new>
 #include <atomic>
 #include <limits>
+#include <array>
 
 namespace thunder::spsc {
     namespace details {
-        /**
-        * @brief Heap-backed storage for the SPSC queue.
-        *
-        * Allocates a contiguous array with padding to reduce false sharing. Capacity is stored
-        * as (requested + 1) to maintain the one-empty-slot invariant.
-        *
-        * @tparam T         Item type stored in the queue.
-        * @tparam Allocator Allocator for the underlying vector.
-        */
+        static constexpr std::size_t maxBytesOnStack = 2'097'152; // 2 MBs
+
+        template<class T, std::size_t Size>
+        concept MaxStackSize = Size <= maxBytesOnStack / sizeof(T);
+
         template<class T, class Allocator = std::allocator<T>>
         struct heap_buffer {
             explicit heap_buffer(const std::size_t capacity, const Allocator& allocator = Allocator())
@@ -38,6 +35,27 @@ namespace thunder::spsc {
             const std::size_t capacity;
             std::vector<T, Allocator> data;
         };
+
+        template<class T, std::size_t Size, class Allocator = std::allocator<T>>
+        struct stack_buffer {
+            explicit stack_buffer(const std::size_t capacity, const Allocator& allocator = Allocator()) {
+                if (capacity) {
+                    throw std::invalid_argument("Capacity in constructor is ignored for stack allocations");
+                }
+            }
+
+            stack_buffer(const stack_buffer &lhs) = delete;
+            stack_buffer &operator=(const stack_buffer &lhs) = delete;
+            stack_buffer(stack_buffer &&lhs) = delete;
+            stack_buffer &operator=(stack_buffer &&lhs) = delete;
+            ~stack_buffer() = default;
+
+            static constexpr std::size_t capacity{Size + 1};
+            static constexpr std::size_t padding = (std::hardware_destructive_interference_size - 1) / sizeof(T) + 1;
+
+            // (2 * padding) is for preventing cache contention between adjacent memory
+            std::array<T, capacity + (2 * padding)> data;
+        };
     }
 
 
@@ -56,10 +74,11 @@ namespace thunder::spsc {
      * @tparam T         Item type.
      * @tparam Allocator Allocator type for storage.
      */
-    template<class T, class Allocator = std::allocator<T>>
-    class queue : public details::heap_buffer<T, Allocator> {
+    template<class T, std::size_t Size = 0, class Allocator = std::allocator<T>>
+    requires (details::MaxStackSize<T, Size> || !Size)
+    class queue : public std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T,Size>>  {
     public:
-        using base = details::heap_buffer<T, Allocator>;
+        using base = std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T, Size, Allocator>>;
 
         /**
          * @brief Construct a queue with a given logical capacity.
@@ -101,7 +120,7 @@ namespace thunder::spsc {
        * @param item The item to move into the queue.
        * @return \c true if the item was enqueued; \c false if the queue was full.
        */
-        [[nodiscard]] bool try_push(T&& item) { return  m_inner.try_push(item); }
+        [[nodiscard]] bool try_push(T&& item) { return m_inner.try_push(std::move(item)); }
 
         /**
          * @brief In-place construct and push the item into the queue.
@@ -146,9 +165,11 @@ namespace thunder::spsc {
             * Spins if the queue is full; when full, refreshes the cached \c readIndex with an acquire
             * load to observe the consumer’s progress.
             *
+            * @tparam U   Any type that can be forwarded into a \c T \c
             * @param item item to push.
             */
-            void push(T&& item) {
+            template<class U>
+            void push(U&& item) {
                 //a relaxed load is fine here because the producer is the only writer of writeIndex
                 const auto writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_relaxed);
                 const auto nextWriteIndex = (writeIndex == m_queue->base::capacity - 1) ? 0 : writeIndex + 1;
@@ -161,7 +182,7 @@ namespace thunder::spsc {
                 }
 
                 // write the payload before publishing writeIndex.
-                m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<T>(item);
+                m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<U>(item);
 
                 // Publish the new writeIndex to the consumer.
                 // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
@@ -173,12 +194,14 @@ namespace thunder::spsc {
             * @brief Producer-side nonblocking try_push by perfect-forwarding.
             *
             * Returns immediately if the queue is full after one acquire refresh of the cached
-             * \c readIndex. On success, publishes with a release-store to \c writeIndex.
+            * \c readIndex. On success, publishes with a release-store to \c writeIndex.
             *
+            * @tparam U   Any type that can be forwarded into a \c T \c
             * @param item item to push.
             * @return \c true on success; \c false if full.
             */
-            bool try_push(T&& item) {
+            template<class U>
+            bool try_push(U&& item) {
                 //a relaxed load is fine here because the producer is the only writer of writeIndex
                 const auto writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_relaxed);
                 const auto nextWriteIndex = (writeIndex == m_queue->base::capacity - 1) ? 0 : writeIndex + 1;
@@ -196,7 +219,7 @@ namespace thunder::spsc {
                 }
 
                 // write the payload before publishing writeIndex.
-                m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<T>(item);
+                m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<U>(item);
 
                 // Publish the new writeIndex to the consumer.
                 // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
@@ -282,7 +305,7 @@ namespace thunder::spsc {
             queue* m_queue;
         };
 
-        std::vector<T, Allocator>& data() { return base::data; }
+       auto& data() { return base::data; }
 
         struct alignas(std::hardware_destructive_interference_size) cacheline_writer {
             std::atomic<std::size_t> writeIndex{0};
