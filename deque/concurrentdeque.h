@@ -7,7 +7,7 @@
 
 namespace thunder {
     enum class reclamation_technique {
-        bounded, // does not resize the buffer, push will fail when buffer is full
+        bounded, // does not resize the buffer, push will fail when the buffer is full
         deferred, // resizes the buffer and reclaims the memory when the concurrent_deque is destroyed
     };
 
@@ -84,7 +84,7 @@ namespace thunder {
         /**
          * @brief Copy constructor is deleted.
          *
-         * concurrent_deque is non-copyable to avoid issues with shared ownership of internal state.
+         * Concurrent_deque is non-copyable to avoid issues with shared ownership of the internal state.
          */
         concurrent_deque(const concurrent_deque& rhs) = delete;
         /**
@@ -129,7 +129,7 @@ namespace thunder {
         /**
          * @brief Checks if the deque is empty (approximate).
          *
-         * Based on relaxed reads; result may be stale under concurrency.
+         * Based on relaxed reads; a result may be stale under concurrency.
          *
          * @return true if the deque appears empty; false otherwise.
          */
@@ -149,7 +149,7 @@ namespace thunder {
          * @return true if the item was successfully pushed; false if resizing failed.
          */
         bool push(const T& item) noexcept {
-            // std::memory_order_relaxed is sufficient because this load doesn't acquire anything from
+            // std::memory_order_relaxed is enough because this load doesn't acquire anything from
             // another thread. m_bottom is only written in pop() which cannot be concurrent with push()
             auto bottom = m_bottom.load(std::memory_order_relaxed);
 
@@ -157,7 +157,7 @@ namespace thunder {
             // so we need to observe their updates.
             auto top = m_top.load(std::memory_order_acquire);
 
-            // std::memory_order_relaxed is sufficient because m_buffer is only replaced by the owner thread
+            // std::memory_order_relaxed is enough because m_buffer is only replaced by the owner thread
             auto buffer = m_buffer.load(std::memory_order_relaxed);
 
             if (needs_resize(buffer, bottom, top)) [[unlikely]] {
@@ -173,10 +173,10 @@ namespace thunder {
                     return false;
                 }
 
-                // replace buffer with the new resized one and collect the old buffer for deferred reclamation
+                // replace the buffer with the new resized one and collect the old buffer for deferred reclamation
                 m_reclaimer.collect(std::exchange(buffer, bigger.value()));
 
-                // std::memory_order_relaxed is sufficient because only the owner thread writes m_buffer, so no synchronization needed.
+                // std::memory_order_relaxed is enough because only the owner thread writes m_buffer, so no synchronization needed.
                 m_buffer.store(buffer, std::memory_order_relaxed);
             }
 
@@ -230,7 +230,7 @@ namespace thunder {
         *         - On failure: an error reason indicating either an empty deque or a failed race.
         */
         std::expected<T, StealFailureReason> steal() noexcept {
-            // Load the current top index. Note: A Key component of this algorithm is that m_top is read before m_bottom here
+            // Load the current top index. Note: A Key part of this algorithm is that m_top is read before m_bottom here
             auto top = m_top.load(std::memory_order_acquire);
 
             // Sequentially consistent fence to prevent reordering of the loads of m_top and m_bottom.
@@ -274,15 +274,15 @@ namespace thunder {
         *         - On failure: an error reason indicating either an empty deque or a failed contention.
         */
          std::expected<T, PopFailureReason> pop_bottom() noexcept {
-            // std::memory_order_relaxed is sufficient because m_bottom is only written by the owner thread
+            // std::memory_order_relaxed is enough because m_bottom is only written by the owner thread
             const auto bottom = m_bottom.load(std::memory_order_relaxed) -1;
             const auto buffer = m_buffer.load(std::memory_order_relaxed);
 
-            // Temporarily decrement bottom — relaxed store is sufficient, as no ordering is required yet.
+            // Temporarily decrement bottom — relaxed store is enough, as no ordering is required yet.
             m_bottom.store(bottom, std::memory_order_relaxed);
 
             // Issue a full memory fence to enforce a sequentially consistent view.
-            // This ensures visibility of all prior writes (e.g., by producers) before evaluating queue state.
+            // This ensures visibility of all prior writings (e.g., by producers) before evaluating the queue state.
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
             // Load m_top with relaxed ordering; correctness is ensured by the preceding fence and a later CAS.
@@ -291,8 +291,8 @@ namespace thunder {
             // Compute the length after the bottom index was decremented
             const auto length = bottom - top;
             if (length < 0) {
-                //the queue is empty. Restore bottom and report failure
-                // std::memory_order_relaxed is sufficient because we're not publishing any data.
+                //The queue is empty. Restore bottom and report failure
+                // std::memory_order_relaxed is enough because we're not publishing any data.
                 m_bottom.store(bottom + 1, std::memory_order_relaxed);
                 return std::unexpected{ PopFailureReason::EmptyQueue };
             }
@@ -327,7 +327,7 @@ namespace thunder {
         *         - On failure: an error reason indicating the deque was empty.
         */
         std::expected<T, PopFailureReason> pop_top() noexcept {
-             // std::memory_order_relaxed is sufficient because m_bottom is only written by the owner thread
+             // std::memory_order_relaxed is enough because m_bottom is only written by the owner thread
              const auto bottom = m_bottom.load(std::memory_order_relaxed);
 
              // Use std::memory_order_seq_cst to enforce a total order among top updates
@@ -335,11 +335,11 @@ namespace thunder {
 
 
              if (bottom - (top + 1) < 0) {
-                 // std::memory_order_relaxed is sufficient because there is no ordering w.r.t other read/writes
+                 // std::memory_order_relaxed is enough because there is no ordering w.r.t other read/writes
                  m_top.store(top, std::memory_order_relaxed);
                  return std::unexpected{ PopFailureReason::EmptyQueue };
              }
-             // std::memory_order_relaxed is sufficient because there is no ordering w.r.t other read/writes
+             // std::memory_order_relaxed is enough because there is no ordering w.r.t other read/writes
              return m_buffer.load(std::memory_order_relaxed)->read_at(top);
          }
 
