@@ -8,3 +8,5 @@ L2 Unified 1024 KiB (x12)<br>
 L3 Unified 32768 KiB (x2)
 
 ![SPSC Queue Throughput](benchmark/spsc_bench.svg)
+
+![SPSC Queue Throughput](benchmark/spsc_bench_locks.svg)
