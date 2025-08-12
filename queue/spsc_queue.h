@@ -6,6 +6,8 @@
 #include <limits>
 #include <array>
 #include <stdexcept>
+#include "../backoff/backoff.h"
+#include "../parker/thread_parker.h"
 
 namespace thunder::spsc {
     namespace details {
@@ -60,6 +62,67 @@ namespace thunder::spsc {
         };
     }
 
+    enum class wait_mode {
+        busy_wait,
+        backoff
+    };
+
+    template<wait_mode mode>
+    struct wait_policy;
+
+    template<>
+    struct wait_policy<wait_mode::busy_wait> {
+        static void reset(backoff& backoff) noexcept {
+            backoff.reset();
+        }
+
+        static void idle(backoff& backoff, thread_parker* parker) noexcept {
+            if (backoff.is_completed() && parker) {
+                parker->park();
+            }
+            else {
+                backoff.snooze();
+            }
+        }
+
+        static void notify(thread_parker* parker) noexcept {
+            if (parker) {
+                parker->unpark();
+            }
+        }
+    };
+
+    template<>
+    struct wait_policy<wait_mode::backoff> {
+        static void reset(backoff&) noexcept {}
+        static void idle(backoff&, thread_parker*) noexcept {}
+        static void notify(thread_parker*) noexcept {}
+    };
+
+    template<wait_mode Mode>
+    class wait_storage;
+
+    template<>
+    class wait_storage<wait_mode::busy_wait> {
+    public:
+        thread_parker* consumer_parker() noexcept { return nullptr; }
+        thread_parker* producer_parker() noexcept { return nullptr; }
+        void notify_consumer() noexcept {}
+        void notify_producer() noexcept {}
+    };
+
+    template<>
+    class wait_storage<wait_mode::backoff> {
+    public:
+        thread_parker* consumer_parker() noexcept { return &m_consumer; }
+        thread_parker* producer_parker() noexcept { return &m_producer; }
+        void notify_consumer() noexcept { m_consumer.unpark(); }
+        void notify_producer() noexcept { m_producer.unpark(); }
+    private:
+        thread_parker m_consumer{};
+        thread_parker m_producer{};
+    };
+
     /**
      * @brief Single-producer, single-consumer lock-free queue.
      *
@@ -75,9 +138,14 @@ namespace thunder::spsc {
      * @tparam T         Item type.
      * @tparam Allocator Allocator type for storage.
      */
-    template<class T, std::size_t Size = 0, class Allocator = std::allocator<T>>
+    template<
+        class T,
+        std::size_t Size = 0,
+        wait_mode WaitMode = wait_mode::busy_wait,
+        class Allocator = std::allocator<T>
+    >
     requires (details::MaxStackSize<T, Size> || !Size)
-    class queue : public std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T,Size>>  {
+    class queue : public std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T,Size>>, wait_storage<WaitMode> {
     public:
         using base = std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T, Size, Allocator>>;
 
@@ -233,8 +301,22 @@ namespace thunder::spsc {
                 // If the buffer is full, refresh our cached readIndex by loading the consumer's readIndex.
                 // We need acquire ordering here so that, once we observe the consumer’s release-store to readIndex,
                 // we also know the consumer is done reading the slot we might overwrite later.
-                while (nextWriteIndex == m_queue->m_writer.readIndex) {
-                    m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+                if constexpr (WaitMode == wait_mode::busy_wait) {
+                    while (nextWriteIndex == m_queue->m_writer.readIndex) {
+                        m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+                    }
+                }
+                else {
+                    backoff backoff;
+                    while (nextWriteIndex == m_queue->m_writer.readIndex) {
+                        m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+
+                        if (nextWriteIndex != m_queue->m_writer.readIndex) {
+                            wait_policy<WaitMode>::reset(backoff);
+                            break;
+                        }
+                        wait_policy<WaitMode>::idle(backoff, m_queue->producer_parker());
+                    }
                 }
 
                 // write the payload before publishing writeIndex.
@@ -244,6 +326,8 @@ namespace thunder::spsc {
                 // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
                 // This guarantees the item/payload write happens-before the consumer sees the index advance.
                 m_queue->m_writer.writeIndex.store(nextWriteIndex, std::memory_order_release);
+
+                m_queue->notify_consumer();
             }
 
             /**
@@ -314,8 +398,22 @@ namespace thunder::spsc {
                 // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
                 // by loading the producer’s writeIndex.
                 // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
-                while (readIndex == m_queue->m_reader.writeIndex) {
-                    m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                if constexpr (WaitMode == wait_mode::busy_wait) {
+                    while (readIndex == m_queue->m_reader.writeIndex) {
+                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    }
+                }
+                else {
+                    backoff backoff;
+                    while (readIndex == m_queue->m_reader.writeIndex) {
+                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+
+                        if (readIndex != m_queue->m_reader.readIndex) {
+                            wait_policy<WaitMode>::reset(backoff);
+                            break;
+                        }
+                        wait_policy<WaitMode>::idle(backoff, m_queue->consumer_parker());
+                    }
                 }
 
                 T item = std::move(m_queue->data()[readIndex + m_queue->base::padding]);
@@ -324,6 +422,8 @@ namespace thunder::spsc {
                 // Release our consumption to the producer (who acquires readIndex when checking for space).
                 // This prevents the producer from overwriting the slot before our read happens-before.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
+
+                m_queue->notify_producer();
                 return item;
             }
 
@@ -344,8 +444,22 @@ namespace thunder::spsc {
                 // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
                 // by loading the producer’s writeIndex.
                 // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
-                while (readIndex == m_queue->m_reader.writeIndex) {
-                    m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                if constexpr (WaitMode == wait_mode::busy_wait) {
+                    while (readIndex == m_queue->m_reader.writeIndex) {
+                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    }
+                }
+                else {
+                    backoff backoff;
+                    while (readIndex == m_queue->m_reader.writeIndex) {
+                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+
+                        if (readIndex != m_queue->m_reader.readIndex) {
+                            wait_policy<WaitMode>::reset(backoff);
+                            break;
+                        }
+                        wait_policy<WaitMode>::idle(backoff, m_queue->consumer_parker());
+                    }
                 }
 
                 item = m_queue->data()[readIndex + m_queue->base::padding];
@@ -354,6 +468,8 @@ namespace thunder::spsc {
                 // Release our consumption to the producer (who acquires readIndex when checking for space).
                 // This prevents the producer from overwriting the slot before our read happens-before.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
+
+                m_queue->notify_producer();
             }
 
             /**
@@ -446,5 +562,10 @@ namespace thunder::spsc {
         } m_reader;
 
         inner m_inner;
+
+        thread_parker* consumer_parker() noexcept { return wait_storage<WaitMode>::consumer_parker(); }
+        thread_parker* producer_parker() noexcept { return wait_storage<WaitMode>::producer_parker(); }
+        void notify_consumer() noexcept { wait_storage<WaitMode>::notify_consumer(); }
+        void notify_producer() noexcept { wait_storage<WaitMode>::notify_producer(); }
     };
 }
