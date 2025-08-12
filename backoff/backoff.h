@@ -1,24 +1,9 @@
 #pragma once
 #include <algorithm>
-#include <cstdint>
 #include <thread>
+#include "../utils/hints.h"
 
 namespace thunder {
-    namespace details {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-#include <immintrin.h>
-#endif
-        inline void cpu_relax() noexcept {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-            _mm_pause();
-#elif defined(__aarch64__) || defined(_M_ARM64)
-            asm volatile("yield");
-#elif defined(__arm__) || defined(_M_ARM)
-            asm volatile("yield");
-#endif
-        }
-    }
-
     class backoff {
     public:
         void reset() noexcept { m_step = 0; }
@@ -27,7 +12,7 @@ namespace thunder {
             const uint32_t iterations = 1u << std::min(step, m_spinLimit);
 
             for (uint32_t i = 0; i < iterations; i++) {
-                details::cpu_relax();
+                hint::spin_loop();
             }
 
             if (m_step <= m_spinLimit) {
@@ -42,7 +27,7 @@ namespace thunder {
                 const uint32_t iterations = 1u << step;
 
                 for (uint32_t i = 0; i < iterations; i++) {
-                    details::cpu_relax();
+                    hint::spin_loop();
                 }
             }
             else {
