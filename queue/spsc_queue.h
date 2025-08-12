@@ -77,12 +77,9 @@ namespace thunder::spsc {
         }
 
         static void idle(backoff& backoff, thread_parker* parker) noexcept {
-            if (backoff.is_completed() && parker) {
-                parker->park();
-            }
-            else {
-                backoff.snooze();
-            }
+            backoff.is_completed() && parker
+                ? parker->park()
+                : backoff.snooze();
         }
 
         static void notify(thread_parker* parker) noexcept {
@@ -114,8 +111,8 @@ namespace thunder::spsc {
     template<>
     class wait_storage<wait_mode::backoff> {
     public:
-        thread_parker* consumer_parker() noexcept { return &m_consumer; }
-        thread_parker* producer_parker() noexcept { return &m_producer; }
+        thread_parker* consumer_parker() noexcept { return std::addressof(m_consumer); }
+        thread_parker* producer_parker() noexcept { return  std::addressof(m_producer); }
         void notify_consumer() noexcept { m_consumer.unpark(); }
         void notify_producer() noexcept { m_producer.unpark(); }
     private:
