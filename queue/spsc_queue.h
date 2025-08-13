@@ -265,22 +265,22 @@ namespace thunder::spsc {
             void push(U&& item) {
                 //a relaxed load is fine here because the producer is the only writer of writeIndex
                 const auto writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_relaxed);
-                const auto nextWriteIndex = (writeIndex == m_queue->base::capacity - 1) ? 0 : writeIndex + 1;
+                const auto nextWriteIndex = (writeIndex == m_queue->buffer_storage::capacity - 1) ? 0 : writeIndex + 1;
 
                 // If the buffer is full, refresh our cached readIndex by loading the consumer's readIndex.
                 // We need acquire ordering here so that, once we observe the consumer’s release-store to readIndex,
                 // we also know the consumer is done reading the slot we might overwrite later.
                 if constexpr (WaitMode == wait_mode::busy_wait) {
-                    while (nextWriteIndex == m_queue->m_writer.readIndex) {
+                    while (nextWriteIndex == m_queue->m_writer.cachedReadIndex) {
                         m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
                     }
                 }
                 else {
                     backoff backoff;
-                    while (nextWriteIndex == m_queue->m_writer.readIndex) {
-                        m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+                    while (nextWriteIndex == m_queue->m_writer.cachedReadIndex) {
+                        m_queue->m_writer.cachedReadIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
 
-                        if (nextWriteIndex != m_queue->m_writer.readIndex) {
+                        if (nextWriteIndex != m_queue->m_writer.cachedReadIndex) {
                             wait_policy<WaitMode>::reset(backoff);
                             break;
                         }
@@ -289,7 +289,7 @@ namespace thunder::spsc {
                 }
 
                 // write the payload before publishing writeIndex.
-                m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<U>(item);
+                m_queue->data()[writeIndex + m_queue->buffer_storage::padding] = std::forward<U>(item);
 
                 // Publish the new writeIndex to the consumer.
                 // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
@@ -315,22 +315,22 @@ namespace thunder::spsc {
 
                 //a relaxed load is fine here because the producer is the only writer of writeIndex
                 const auto writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_relaxed);
-                const auto nextWriteIndex = (writeIndex == m_queue->base::capacity - 1) ? 0 : writeIndex + 1;
+                const auto nextWriteIndex = (writeIndex == m_queue->buffer_storage::capacity - 1) ? 0 : writeIndex + 1;
 
-                if (nextWriteIndex == m_queue->m_writer.readIndex) {
+                if (nextWriteIndex == m_queue->m_writer.cachedReadIndex) {
                     // If the buffer is full, refresh our cached readIndex once by loading the consumer's readIndex.
                     // We need acquire ordering here so that, once we observe the consumer’s release-store to readIndex,
                     // we also know the consumer is done reading the slot we might overwrite later.
-                    m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+                    m_queue->m_writer.cachedReadIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
 
                     // buffer is still full after refresh, return false to indicate that we failed to push the item
-                    if (nextWriteIndex == m_queue->m_writer.readIndex) {
+                    if (nextWriteIndex == m_queue->m_writer.cachedReadIndex) {
                         return false;
                     }
                 }
 
                 // write the payload before publishing writeIndex.
-                m_queue->data()[writeIndex + m_queue->base::padding] = std::forward<U>(item);
+                m_queue->data()[writeIndex + m_queue->buffer_storage::padding] = std::forward<U>(item);
 
                 // Publish the new writeIndex to the consumer.
                 // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
@@ -374,8 +374,8 @@ namespace thunder::spsc {
                 }
                 else {
                     backoff backoff;
-                    while (readIndex == m_queue->m_reader.writeIndex) {
-                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    while (readIndex == m_queue->m_reader.cachedWriteIndex) {
+                        m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
 
                         if (readIndex != m_queue->m_reader.readIndex) {
                             wait_policy<WaitMode>::reset(backoff);
@@ -385,8 +385,8 @@ namespace thunder::spsc {
                     }
                 }
 
-                T item = std::move(m_queue->data()[readIndex + m_queue->base::padding]);
-                const auto nextReadIndex = (readIndex == m_queue->base::capacity - 1) ? 0 : readIndex + 1;
+                T item = std::move(m_queue->data()[readIndex + m_queue->buffer_storage::padding]);
+                const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
                 // Release our consumption to the producer (who acquires readIndex when checking for space).
                 // This prevents the producer from overwriting the slot before our read happens-before.
@@ -414,14 +414,14 @@ namespace thunder::spsc {
                 // by loading the producer’s writeIndex.
                 // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
                 if constexpr (WaitMode == wait_mode::busy_wait) {
-                    while (readIndex == m_queue->m_reader.writeIndex) {
-                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    while (readIndex == m_queue->m_reader.cachedWriteIndex) {
+                        m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
                     }
                 }
                 else {
                     backoff backoff;
-                    while (readIndex == m_queue->m_reader.writeIndex) {
-                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    while (readIndex == m_queue->m_reader.cachedWriteIndex) {
+                        m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
 
                         if (readIndex != m_queue->m_reader.readIndex) {
                             wait_policy<WaitMode>::reset(backoff);
@@ -431,8 +431,8 @@ namespace thunder::spsc {
                     }
                 }
 
-                item = m_queue->data()[readIndex + m_queue->base::padding];
-                const auto nextReadIndex = (readIndex == m_queue->base::capacity - 1) ? 0 : readIndex + 1;
+                item = m_queue->data()[readIndex + m_queue->buffer_storage::padding];
+                const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
                 // Release our consumption to the producer (who acquires readIndex when checking for space).
                 // This prevents the producer from overwriting the slot before our read happens-before.
@@ -454,20 +454,20 @@ namespace thunder::spsc {
                 // a relaxed load is fine here because the consumer is the only writer of readIndex
                 const auto readIndex = m_queue->m_reader.readIndex.load(std::memory_order_relaxed);
 
-                if (readIndex == m_queue->m_reader.writeIndex) {
+                if (readIndex == m_queue->m_reader.cachedWriteIndex) {
                     // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
                     // by loading the producer’s writeIndex (our cached index could be out of date).
                     // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
-                    m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
 
                     // buffer is still empty after "refresh", return std::nullopt to indicate that the pop failed.
-                    if (readIndex == m_queue->m_reader.writeIndex) {
+                    if (readIndex == m_queue->m_reader.cachedWriteIndex) {
                         return std::nullopt;
                     }
                 }
 
-                T item = std::move(m_queue->data()[readIndex + m_queue->base::padding]);
-                const auto nextReadIndex = (readIndex == m_queue->base::capacity - 1) ? 0 : readIndex + 1;
+                T item = std::move(m_queue->data()[readIndex + m_queue->buffer_storage::padding]);
+                const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
                 // Release our consumption to the producer (who acquires readIndex when checking for space).
                 // This prevents the producer from overwriting the slot before our read happens-before.
@@ -490,20 +490,20 @@ namespace thunder::spsc {
                 // a relaxed load is fine here because the consumer is the only writer of readIndex
                 const auto readIndex = m_queue->m_reader.readIndex.load(std::memory_order_relaxed);
 
-                if (readIndex == m_queue->m_reader.writeIndex) {
+                if (readIndex == m_queue->m_reader.cachedWriteIndex) {
                     // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
                     // by loading the producer’s writeIndex (our cached index could be out of date).
                     // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
-                    m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
 
                     // buffer is still empty after "refresh", return std::nullopt to indicate that the pop failed.
-                    if (readIndex == m_queue->m_reader.writeIndex) {
+                    if (readIndex == m_queue->m_reader.cachedWriteIndex) {
                         return false;
                     }
                 }
 
-                item =  m_queue->data()[readIndex + m_queue->base::padding];
-                const auto nextReadIndex = (readIndex == m_queue->base::capacity - 1) ? 0 : readIndex + 1;
+                item =  m_queue->data()[readIndex + m_queue->buffer_storage::padding];
+                const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
                 // Release our consumption to the producer (who acquires readIndex when checking for space).
                 // This prevents the producer from overwriting the slot before our read happens-before.
@@ -518,14 +518,14 @@ namespace thunder::spsc {
 
         struct alignas(std::hardware_destructive_interference_size) cacheline_writer {
             std::atomic<std::size_t> writeIndex{0};
-            std::size_t readIndex{0};
+            std::size_t cachedReadIndex{0};
 
             const std::size_t padding = buffer_storage::padding;
         } m_writer;
 
         struct alignas(std::hardware_destructive_interference_size) cacheline_reader {
             std::atomic<std::size_t> readIndex{0};
-            std::size_t writeIndex{0};
+            std::size_t cachedWriteIndex{0};
 
             std::size_t capacity{};
         } m_reader;
