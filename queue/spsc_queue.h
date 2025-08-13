@@ -11,14 +11,9 @@
 
 namespace thunder::spsc {
     namespace details {
-        static constexpr std::size_t maxBytesOnStack = 2'097'152; // 2 MBs
-
-        template<class T, std::size_t Size>
-        concept MaxStackSize = Size <= maxBytesOnStack / sizeof(T);
-
         template<class T, class Allocator = std::allocator<T>>
-        struct heap_buffer {
-            explicit heap_buffer(const std::size_t capacity, const Allocator& allocator = Allocator())
+        struct buffer_storage {
+            explicit buffer_storage(const std::size_t capacity, const Allocator& allocator = Allocator())
                 :
                 capacity(capacity + 1),
                 data(allocator)
@@ -26,39 +21,18 @@ namespace thunder::spsc {
                 data.resize(capacity + 2 * padding);
             }
 
-            heap_buffer(const heap_buffer &lhs) = delete;
-            heap_buffer &operator=(const heap_buffer &lhs) = delete;
-            heap_buffer(heap_buffer &&lhs) = delete;
-            heap_buffer &operator=(heap_buffer &&lhs) = delete;
+            buffer_storage(const buffer_storage &lhs) = delete;
+            buffer_storage &operator=(const buffer_storage &lhs) = delete;
+            buffer_storage(buffer_storage &&lhs) = delete;
+            buffer_storage &operator=(buffer_storage &&lhs) = delete;
 
-            ~heap_buffer() = default;
+            ~buffer_storage() = default;
 
             static constexpr std::size_t padding = (std::hardware_destructive_interference_size - 1) / sizeof(T) + 1;
             static constexpr std::size_t max_size = std::numeric_limits<std::size_t>::max();
 
             const std::size_t capacity;
             std::vector<T, Allocator> data;
-        };
-
-        template<class T, std::size_t Size, class Allocator = std::allocator<T>>
-        struct stack_buffer {
-            explicit stack_buffer(const std::size_t capacity, const Allocator& allocator = Allocator()) {
-                if (capacity) {
-                    throw std::invalid_argument("Capacity in constructor is ignored for stack allocations");
-                }
-            }
-
-            stack_buffer(const stack_buffer &lhs) = delete;
-            stack_buffer &operator=(const stack_buffer &lhs) = delete;
-            stack_buffer(stack_buffer &&lhs) = delete;
-            stack_buffer &operator=(stack_buffer &&lhs) = delete;
-            ~stack_buffer() = default;
-
-            static constexpr std::size_t capacity{Size + 1};
-            static constexpr std::size_t padding = (std::hardware_destructive_interference_size - 1) / sizeof(T) + 1;
-
-            // (2 * padding) is for preventing cache contention between adjacent memory
-            std::array<T, capacity + (2 * padding)> data;
         };
     }
 
@@ -137,14 +111,12 @@ namespace thunder::spsc {
      */
     template<
         class T,
-        std::size_t Size = 0,
         wait_mode WaitMode = wait_mode::busy_wait,
         class Allocator = std::allocator<T>
     >
-    requires (details::MaxStackSize<T, Size> || !Size)
-    class queue : public std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T,Size>>, wait_storage<WaitMode> {
+    class queue : details::buffer_storage<T, Allocator>, wait_storage<WaitMode> {
     public:
-        using base = std::conditional_t<Size == 0, details::heap_buffer<T, Allocator>, details::stack_buffer<T, Size, Allocator>>;
+        using buffer_storage = details::buffer_storage<T, Allocator>;
 
         /**
          * @brief Construct a queue with a given logical capacity.
@@ -153,10 +125,10 @@ namespace thunder::spsc {
          */
         explicit queue(const std::size_t capacity, const Allocator& allocator = Allocator())
             :
-            base(capacity, allocator),
+            buffer_storage(capacity, allocator),
             m_inner(this)
         {
-            m_reader.capacity = base::capacity;
+            m_reader.capacity = buffer_storage::capacity;
         }
 
         queue(const queue &lhs) = delete;
@@ -249,7 +221,7 @@ namespace thunder::spsc {
             if (writeIndex >= readIndex) {
                 return writeIndex - readIndex;
             }
-            return base::capacity - readIndex + writeIndex;
+            return buffer_storage::capacity - readIndex + writeIndex;
         }
 
         /**
@@ -266,7 +238,7 @@ namespace thunder::spsc {
          *
          * @return The capacity of the queue.
          */
-        [[nodiscard]] std::size_t capacity() const noexcept { return base::capacity -1; }
+        [[nodiscard]] std::size_t capacity() const noexcept { return buffer_storage::capacity -1; }
     private:
         class inner {
         public:
@@ -542,13 +514,13 @@ namespace thunder::spsc {
             queue* m_queue;
         };
 
-        auto& data() noexcept { return base::data; }
+        auto& data() noexcept { return buffer_storage::data; }
 
         struct alignas(std::hardware_destructive_interference_size) cacheline_writer {
             std::atomic<std::size_t> writeIndex{0};
             std::size_t readIndex{0};
 
-            const std::size_t padding = base::padding;
+            const std::size_t padding = buffer_storage::padding;
         } m_writer;
 
         struct alignas(std::hardware_destructive_interference_size) cacheline_reader {
