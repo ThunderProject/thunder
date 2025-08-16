@@ -2,7 +2,8 @@
 #include <catch2/catch_approx.hpp>
 #include <thread>
 #include <barrier>
-#include "../concurrentdeque.h"
+
+import concurrent_deque;
 
 using namespace thunder;
 

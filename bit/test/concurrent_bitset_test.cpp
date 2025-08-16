@@ -3,7 +3,8 @@
 #include <thread>
 #include <barrier>
 #include <vector>
-#include "../concurrent_bitset.h"
+
+import concurrent_bitset;
 
 using namespace thunder;
 

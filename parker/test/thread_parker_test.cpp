@@ -1,7 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <thread>
 #include <chrono>
-#include "../thread_parker.h"
+
+import thread_parker;
 
 using namespace std::chrono_literals;
 using thunder::thread_parker;

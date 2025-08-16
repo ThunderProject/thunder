@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
-#include "../backoff.h"
 
+import backoff;
 using namespace thunder;
 
 TEST_CASE("backoff starts not completed", "[backoff]") {

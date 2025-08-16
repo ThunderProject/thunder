@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
-#include  "../concurrentringbuffer.h"
+import concurrent_ringbuffer;
 
 TEST_CASE("concurrentringbuffer basic capacity", "[ringbuffer]") {
     constexpr uint64_t requested = 10;
