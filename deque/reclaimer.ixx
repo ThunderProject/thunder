@@ -1,17 +1,18 @@
-#pragma once
+module;
 #include <vector>
+export module reclaimer;
 
 namespace thunder {
     template<class T>
     concept buffer_type = !std::is_array_v<T>;
 
-    template<buffer_type buffer>
+    export template<buffer_type buffer>
     class bounded_reclaimer {
     public:
         void collect(buffer* buf) noexcept {}
     };
 
-    template<buffer_type buffer>
+    export template<buffer_type buffer>
     class deferred_reclaimer {
     public:
         deferred_reclaimer() noexcept {

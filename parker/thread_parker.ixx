@@ -1,16 +1,14 @@
-#pragma once
 #include <semaphore>
 #include <chrono>
+export module thread_parker;
 
 namespace thunder {
-    namespace details {
-        template<class Rep, class Period>
-        concept is_duration = requires
-        {
-            typename std::chrono::duration<Rep, Period>;
-            requires std::is_arithmetic_v<Rep>;
-        };
-    }
+    template<class Rep, class Period>
+    concept is_duration = requires
+    {
+        typename std::chrono::duration<Rep, Period>;
+        requires std::is_arithmetic_v<Rep>;
+    };
 
      /**
      * @brief Lightweight utility for blocking and waking threads.
@@ -26,13 +24,8 @@ namespace thunder {
      * This is often used in synchronization primitives or task schedulers to
      * efficiently block idle threads until new work is available.
      */
-    class thread_parker {
+    export class thread_parker {
     public:
-        thread_parker()
-            :
-            m_token(0)
-        {}
-
         /**
         * @brief Parks the calling thread until a token is available.
         *
@@ -71,7 +64,7 @@ namespace thunder {
         * @throws std::system_error or a timeout-related exception if the underlying operations fails.
         */
         template<class Rep, class Period>
-        requires details::is_duration<Rep, Period>
+        requires is_duration<Rep, Period>
         [[nodiscard]] bool park_for(const std::chrono::duration<Rep, Period>& timeout) {
             // Fast path: try to consume the token without blocking
             if (m_token.try_acquire()) {
@@ -127,6 +120,6 @@ namespace thunder {
             m_token.release();
         }
     private:
-        std::binary_semaphore m_token;
+        std::binary_semaphore m_token{0};
     };
 }

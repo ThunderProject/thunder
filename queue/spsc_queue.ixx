@@ -1,4 +1,5 @@
-#pragma once
+module;
+
 #include <optional>
 #include <vector>
 #include <new>
@@ -6,39 +7,42 @@
 #include <limits>
 #include <array>
 #include <stdexcept>
-#include "../backoff/backoff.h"
-#include "../parker/thread_parker.h"
+
+
+export module spsc_queue;
+
+import thread_parker;
+import backoff;
 
 namespace thunder::spsc {
-    namespace details {
-        template<class T, class Allocator = std::allocator<T>>
+    template<class T, class Allocator = std::allocator<T>>
         struct buffer_storage {
-            explicit buffer_storage(const std::size_t capacity, const Allocator& allocator = Allocator())
-                :
-                capacity(capacity + 1),
-                data(allocator)
-            {
-                data.resize(capacity + 2 * padding);
-            }
+        explicit buffer_storage(const std::size_t capacity, const Allocator& allocator = Allocator())
+            :
+            capacity(capacity + 1),
+            data(allocator)
+        {
+            data.resize(capacity + 2 * padding);
+        }
 
-            buffer_storage(const buffer_storage &lhs) = delete;
-            buffer_storage &operator=(const buffer_storage &lhs) = delete;
-            buffer_storage(buffer_storage &&lhs) = delete;
-            buffer_storage &operator=(buffer_storage &&lhs) = delete;
+        buffer_storage(const buffer_storage &lhs) = delete;
+        buffer_storage &operator=(const buffer_storage &lhs) = delete;
+        buffer_storage(buffer_storage &&lhs) = delete;
+        buffer_storage &operator=(buffer_storage &&lhs) = delete;
 
-            ~buffer_storage() = default;
+        ~buffer_storage() = default;
 
-            static constexpr std::size_t padding = (std::hardware_destructive_interference_size - 1) / sizeof(T) + 1;
-            static constexpr std::size_t max_size = std::numeric_limits<std::size_t>::max();
+        static constexpr std::size_t padding = (std::hardware_destructive_interference_size - 1) / sizeof(T) + 1;
+        static constexpr std::size_t max_size = std::numeric_limits<std::size_t>::max();
 
-            const std::size_t capacity;
-            std::vector<T, Allocator> data;
-        };
-    }
+        const std::size_t capacity;
+        std::vector<T, Allocator> data;
+    };
 
-    enum class wait_mode {
+    export enum class wait_mode {
         busy_wait,
-        backoff
+        backoff_spin,
+        backoff_snooze,
     };
 
     template<wait_mode mode>
@@ -46,28 +50,43 @@ namespace thunder::spsc {
 
     template<>
     struct wait_policy<wait_mode::busy_wait> {
+        static void reset(backoff&) noexcept {}
+        static void idle(backoff&, thread_parker*) noexcept {}
+        static void notify(thread_parker*) noexcept {}
+    };
+
+    template<>
+    struct wait_policy<wait_mode::backoff_spin> {
         static void reset(backoff& backoff) noexcept {
             backoff.reset();
         }
 
         static void idle(backoff& backoff, thread_parker* parker) noexcept {
+            backoff.spin();
+        }
+
+        static void notify(thread_parker* parker) noexcept {}
+    };
+
+    template<>
+    struct wait_policy<wait_mode::backoff_snooze> {
+        static void reset(backoff& backoff) noexcept {
+            backoff.reset();
+        }
+
+        static void idle(backoff& backoff, thread_parker* parker) noexcept {
+            [[assume(parker != nullptr)]];
             backoff.is_completed() && parker
                 ? parker->park()
                 : backoff.snooze();
         }
 
         static void notify(thread_parker* parker) noexcept {
-            if (parker) {
+            [[assume(parker != nullptr)]];
+            if (parker) [[likely]] {
                 parker->unpark();
             }
         }
-    };
-
-    template<>
-    struct wait_policy<wait_mode::backoff> {
-        static void reset(backoff&) noexcept {}
-        static void idle(backoff&, thread_parker*) noexcept {}
-        static void notify(thread_parker*) noexcept {}
     };
 
     template<wait_mode Mode>
@@ -83,7 +102,19 @@ namespace thunder::spsc {
     };
 
     template<>
-    class wait_storage<wait_mode::backoff> {
+    class wait_storage<wait_mode::backoff_spin> {
+    public:
+        thread_parker* consumer_parker() noexcept { return std::addressof(m_consumer); }
+        thread_parker* producer_parker() noexcept { return  std::addressof(m_producer); }
+        void notify_consumer() noexcept { m_consumer.unpark(); }
+        void notify_producer() noexcept { m_producer.unpark(); }
+    private:
+        thread_parker m_consumer{};
+        thread_parker m_producer{};
+    };
+
+    template<>
+    class wait_storage<wait_mode::backoff_snooze> {
     public:
         thread_parker* consumer_parker() noexcept { return std::addressof(m_consumer); }
         thread_parker* producer_parker() noexcept { return  std::addressof(m_producer); }
@@ -109,14 +140,14 @@ namespace thunder::spsc {
      * @tparam T         Item type.
      * @tparam Allocator Allocator type for storage.
      */
-    template<
+    export template<
         class T,
         wait_mode WaitMode = wait_mode::busy_wait,
         class Allocator = std::allocator<T>
     >
-    class queue : details::buffer_storage<T, Allocator>, wait_storage<WaitMode> {
+    class queue : buffer_storage<T, Allocator>, wait_storage<WaitMode> {
     public:
-        using buffer_storage = details::buffer_storage<T, Allocator>;
+        using buffer_storage = buffer_storage<T, Allocator>;
 
         /**
          * @brief Construct a queue with a given logical capacity.
@@ -272,7 +303,7 @@ namespace thunder::spsc {
                 // we also know the consumer is done reading the slot we might overwrite later.
                 if constexpr (WaitMode == wait_mode::busy_wait) {
                     while (nextWriteIndex == m_queue->m_writer.cachedReadIndex) {
-                        m_queue->m_writer.readIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
+                        m_queue->m_writer.cachedReadIndex = m_queue->m_reader.readIndex.load(std::memory_order_acquire);
                     }
                 }
                 else {
@@ -296,6 +327,8 @@ namespace thunder::spsc {
                 // This guarantees the item/payload write happens-before the consumer sees the index advance.
                 m_queue->m_writer.writeIndex.store(nextWriteIndex, std::memory_order_release);
 
+                // unpark the consumer thread if it is currently parked.
+                // this is a noop if WaitMode is wait_mode::busy_wait or wait_mode::backoff_spin
                 m_queue->notify_consumer();
             }
 
@@ -351,12 +384,18 @@ namespace thunder::spsc {
                 push(std::move(tmp));
             }
 
+            template<class... Args>
+            [[nodiscard]] bool try_emplace(Args&&... args)
+            requires std::constructible_from<T, Args...> {
+                T tmp(std::forward<Args>(args)...);
+                return try_push(std::move(tmp));
+            }
+
             /**
              * @brief Consumer-side blocking pop.
              *
              * Waits until an item is available, then removes it from the queue and
              * returns it. Blocks (spins) while the queue appears empty,
-             * refreshing the cached write index until new data arrives.
              *
              * @return The next available item, moved from the queue.
              */
@@ -368,8 +407,8 @@ namespace thunder::spsc {
                 // by loading the producer’s writeIndex.
                 // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
                 if constexpr (WaitMode == wait_mode::busy_wait) {
-                    while (readIndex == m_queue->m_reader.writeIndex) {
-                        m_queue->m_reader.writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
+                    while (readIndex == m_queue->m_reader.cachedWriteIndex) {
+                        m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
                     }
                 }
                 else {
@@ -392,6 +431,8 @@ namespace thunder::spsc {
                 // This prevents the producer from overwriting the slot before our read happens-before.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
 
+                // unpark the producer thread if it is currently parked.
+                // this is a noop if WaitMode is wait_mode::busy_wait or wait_mode::backoff_spin
                 m_queue->notify_producer();
                 return item;
             }
@@ -438,6 +479,8 @@ namespace thunder::spsc {
                 // This prevents the producer from overwriting the slot before our read happens-before.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
 
+                // unpark the producer thread if it is currently parked.
+                // this is a noop if WaitMode is wait_mode::busy_wait or wait_mode::backoff_spin
                 m_queue->notify_producer();
             }
 

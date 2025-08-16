@@ -1,7 +1,8 @@
-#pragma once
+module;
 #include <array>
 #include <atomic>
 #include <limits>
+export module concurrent_bitset;
 
 namespace thunder {
     /**
@@ -26,7 +27,7 @@ namespace thunder {
      * Unlike C++ atomics, which default to `seq_cst`, we require an explicit choice to force the user
      * to consider their concurrency model. This prevents "accidental" correctness and clarifies intent.
      */
-    template<size_t Size>
+    export template<size_t Size>
     class concurrent_bitset {
     public:
         concurrent_bitset() noexcept : m_data() {}

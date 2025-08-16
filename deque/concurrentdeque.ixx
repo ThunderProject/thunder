@@ -1,12 +1,14 @@
-#pragma once
+module;
+#include <expected>
 #include <new>
-#include <vector>
+#include <atomic>
 
-#include "reclaimer.h"
-#include "ring/concurrentringbuffer.h"
+export module concurrent_deque;
+import reclaimer;
+import concurrent_ringbuffer;
 
 namespace thunder {
-    enum class reclamation_technique {
+    export enum class reclamation_technique {
         bounded, // does not resize the buffer, push will fail when the buffer is full
         deferred, // resizes the buffer and reclaims the memory when the concurrent_deque is destroyed
     };
@@ -27,17 +29,17 @@ namespace thunder {
     template<reclamation_technique Technique, typename Buffer>
     using reclaimer_selector_t = typename reclaimer_selector<Technique, Buffer>::type;
 
-    enum class PopFailureReason {
+    export enum class PopFailureReason {
         FailedRace,
         EmptyQueue
     };
 
-    enum class StealFailureReason {
+    export enum class StealFailureReason {
         FailedRace,
         EmptyQueue
     };
 
-    enum class Flavor {
+    export enum class Flavor {
         Fifo, // first-in first-out flavor
         Lifo  // last-in first-out flavor
     };
@@ -60,7 +62,7 @@ namespace thunder {
     * @tparam Technique The memory reclamation policy to use when the buffer is full.
     * @tparam flavor Determines whether the owner pops items in FIFO or LIFO order.
     */
-    template<
+    export template<
         class T,
         reclamation_technique Technique = reclamation_technique::deferred,
         Flavor flavor = Flavor::Lifo

@@ -1,7 +1,9 @@
-#pragma once
+export module backoff;
+
 #include <algorithm>
 #include <thread>
-#include "../utils/hints.h"
+
+import hints;
 
 namespace thunder {
     /**
@@ -13,7 +15,7 @@ namespace thunder {
     * and tell when it is a good time to block the thread using a different synchronization mechanism.
     *
     */
-    class backoff {
+    export class backoff {
     public:
         /**
         * @brief Resets the backoff.

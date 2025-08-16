@@ -1,10 +1,11 @@
-#pragma once
-
-namespace thunder::hint {
+module;
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 #include <immintrin.h>
 #endif
-    inline void spin_loop() noexcept {
+export module hints;
+
+namespace thunder::hint {
+    export inline void spin_loop() noexcept {
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
         _mm_pause();
 #elif defined(__aarch64__) || defined(_M_ARM64)

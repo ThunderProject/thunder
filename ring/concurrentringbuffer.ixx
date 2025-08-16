@@ -1,4 +1,4 @@
-#pragma once
+module;
 #include <atomic>
 #include <bit>
 #include <expected>
@@ -6,6 +6,8 @@
 #include <memory>
 #include <ranges>
 #include <string>
+
+export module concurrent_ringbuffer;
 
 namespace thunder {
     /**
@@ -30,7 +32,7 @@ namespace thunder {
     *
     * @tparam T The element type, which must be trivially copyable and compatible with std::atomic.
     */
-    template<class T>
+    export template<class T>
     class concurrentringbuffer {
         static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
     public:
