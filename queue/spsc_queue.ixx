@@ -8,7 +8,6 @@ module;
 #include <array>
 #include <stdexcept>
 
-
 export module spsc_queue;
 
 import thread_parker;
@@ -16,7 +15,7 @@ import backoff;
 
 namespace thunder::spsc {
     template<class T, class Allocator = std::allocator<T>>
-        struct buffer_storage {
+    struct buffer_storage {
         explicit buffer_storage(const std::size_t capacity, const Allocator& allocator = Allocator())
             :
             capacity(capacity + 1),
@@ -61,11 +60,11 @@ namespace thunder::spsc {
             backoff.reset();
         }
 
-        static void idle(backoff& backoff, thread_parker* parker) noexcept {
+        static void idle(backoff& backoff, thread_parker*) noexcept {
             backoff.spin();
         }
 
-        static void notify(thread_parker* parker) noexcept {}
+        static void notify(thread_parker*) noexcept {}
     };
 
     template<>
@@ -124,7 +123,7 @@ namespace thunder::spsc {
         thread_parker m_consumer{};
         thread_parker m_producer{};
     };
-
+    
     /**
      * @brief Single-producer, single-consumer lock-free queue.
      *
@@ -145,7 +144,7 @@ namespace thunder::spsc {
         wait_mode WaitMode = wait_mode::busy_wait,
         class Allocator = std::allocator<T>
     >
-    class queue : buffer_storage<T, Allocator>, wait_storage<WaitMode> {
+    class queue : buffer_storage<T, Allocator>, wait_storage<WaitMode> { // We inherit wait_storage so that we can take advantage of EBO when WaitMode is wait_mode::busy_wait
     public:
         using buffer_storage = buffer_storage<T, Allocator>;
 
