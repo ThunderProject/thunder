@@ -2,6 +2,7 @@ module;
 #include <array>
 #include <atomic>
 #include <limits>
+#include <libassert/assert.hpp>
 export module concurrent_bitset;
 
 namespace thunder {
@@ -45,6 +46,7 @@ namespace thunder {
         * @note Passing an index >= Size results in undefined behavior.
         */
         bool set(const size_t index, std::memory_order order) noexcept {
+            DEBUG_ASSERT(index < Size);
             const auto mask = make_mask(index);
             return m_data[block_index(index)].fetch_or(mask, order) & mask;
         }
@@ -60,6 +62,7 @@ namespace thunder {
          * @note Passing an index >= Size results in undefined behavior.
          */
         bool set(const size_t index, const bool value, const std::memory_order order) noexcept {
+            DEBUG_ASSERT(index < Size);
             return value ? set(index, order) : reset(index, order);
         }
 
@@ -73,6 +76,7 @@ namespace thunder {
          * @note Passing an index >= Size results in undefined behavior.
          */
         bool reset(const size_t index, std::memory_order order) noexcept {
+            DEBUG_ASSERT(index < Size);
             const auto mask = make_mask(index);
             return m_data[block_index(index)].fetch_and(~mask, order) & mask;
         }
@@ -87,6 +91,7 @@ namespace thunder {
         * @note Passing an index >= Size results in undefined behavior.
         */
         [[nodiscard]] bool test(const size_t index, std::memory_order order) const noexcept {
+            DEBUG_ASSERT(index < Size);
             const auto mask = make_mask(index);
             return m_data[block_index(index)].load(order) & mask;
         }
@@ -97,6 +102,7 @@ namespace thunder {
         * @note Passing an index >= Size results in undefined behavior.
         */
         [[nodiscard]] bool get(const size_t index, const std::memory_order order) const noexcept {
+            DEBUG_ASSERT(index < Size);
             return test(index, order);
         }
 
@@ -108,6 +114,7 @@ namespace thunder {
          * @note Passing an index >= Size results in undefined behavior.
          */
         bool operator[](const size_t index) const noexcept {
+            DEBUG_ASSERT(index < Size);
             return test(index, std::memory_order_seq_cst);
         }
 

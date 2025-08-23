@@ -7,7 +7,7 @@ module;
 #include <limits>
 #include <array>
 #include <stdexcept>
-
+#include <libassert/assert.hpp>
 export module spsc_queue;
 
 import thread_parker;
@@ -74,6 +74,7 @@ namespace thunder::spsc {
         }
 
         static void idle(backoff& backoff, thread_parker* parker) noexcept {
+            DEBUG_ASSERT(parker != nullptr, "Parker must not be null in backoff_snooze mode");
             [[assume(parker != nullptr)]];
             backoff.is_completed() && parker
                 ? parker->park()
@@ -81,6 +82,7 @@ namespace thunder::spsc {
         }
 
         static void notify(thread_parker* parker) noexcept {
+            DEBUG_ASSERT(parker != nullptr, "Parker must not be null in backoff_snooze mode");
             [[assume(parker != nullptr)]];
             if (parker) [[likely]] {
                 parker->unpark();
