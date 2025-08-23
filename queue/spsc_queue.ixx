@@ -39,9 +39,9 @@ namespace thunder::spsc {
     };
 
     export enum class wait_mode {
-        busy_wait,
-        backoff_spin,
-        backoff_snooze,
+        busy_wait, // Pure spin-waiting, lowest latency but can waste CPU cycles.
+        backoff_spin, // spinning with exponential backoff to reduce contention.
+        backoff_snooze, //firsts spin with backoff, then park/unpark threads if needed
     };
 
     template<wait_mode mode>
@@ -128,15 +128,9 @@ namespace thunder::spsc {
      * @brief Single-producer, single-consumer lock-free queue.
      *
      * This queue supports exactly one producer thread (calling \c push / \c try_push / \c emplace)
-     * and one consumer thread (calling \c pop / \c try_pop). It uses a ring buffer and minimal
-     * atomic synchronization:
-     *
-     *  - Producer publishes data with a release store to \c writeIndex.
-     *  - Consumer observes availability with an acquire load of \c writeIndex and then reads data.
-     *  - Consumer signals slot reclamation with a release store to \c readIndex.
-     *  - Producer observes space with an acquire load of \c readIndex when full.
-     *
+     * and one consumer thread (calling \c pop / \c try_pop).
      * @tparam T         Item type.
+     * @tparam WaitMode  The WaitMode to use.
      * @tparam Allocator Allocator type for storage.
      */
     export template<
@@ -168,31 +162,31 @@ namespace thunder::spsc {
         ~queue() = default;
 
         /**
-         * @brief Push an item (copy semantics) into the queue.
+         * @brief Push an item into the queue.
          * @param item The item to copy into the queue.
-         * @note Blocks (spins) if the queue is full until space is available.
+         * @note Blocks if the queue is full until space is available.
          */
         void push(const T& item) noexcept(std::is_nothrow_copy_assignable_v<T>) { m_inner.push(item); }
 
 
         /**
-         * @brief Push an item (move semantics) into the queue.
+         * @brief Push an item into the queue.
          * @param item The item to move into the queue.
-         * @note Blocks (spins) if the queue is full until space is available.
+         * @note Blocks if the queue is full until space is available.
          */
         void push(T&& item) noexcept(std::is_nothrow_move_assignable_v<T>) { m_inner.push(std::move(item)); }
 
         /**
         * @brief Tries to push an item into the queue without blocking.
         * @param item The item to copy into the queue.
-        * @return \c true if the item was enqueued; \c false if the queue was full.
+        * @return \c true if the item was enqueued, otherwise \c false.
         */
         [[nodiscard]] bool try_push(const T& item) noexcept(std::is_nothrow_copy_assignable_v<T>) { return m_inner.try_push(item); }
 
         /**
        * @brief Tries to push an item into the queue without blocking.
        * @param item The item to move into the queue.
-       * @return \c true if the item was enqueued; \c false if the queue was full.
+       * @return \c true if the item was enqueued, otherwise \c false.
        */
         [[nodiscard]] bool try_push(T&& item) noexcept(std::is_nothrow_move_assignable_v<T>) { return m_inner.try_push(std::move(item)); }
 
@@ -200,7 +194,7 @@ namespace thunder::spsc {
          * @brief In-place construct and push the item into the queue.
          * @tparam Args Constructor argument types for \c T.
          * @param args  Arguments forwarded to \c T's constructor.
-         * @note Blocks (spins) if the queue is full until space is available.
+         * @note Blocks if the queue is full until space is available.
          */
         template<class... Args>
         void emplace(Args&&... args) noexcept(std::conjunction_v<std::is_nothrow_constructible<T, Args...>, std::is_nothrow_move_constructible<T>>)
@@ -209,16 +203,28 @@ namespace thunder::spsc {
         }
 
         /**
+         * @brief In-place construct and tries to push the item into the queue.
+         * @tparam Args Constructor argument types for \c T.
+         * @param args  Arguments forwarded to \c T's constructor.
+         * @return \c true if the item was enqueued, otherwise \c false.
+         */
+        template<class... Args>
+        void try_emplace(Args&&... args) noexcept(std::conjunction_v<std::is_nothrow_constructible<T, Args...>, std::is_nothrow_move_constructible<T>>)
+        requires std::constructible_from<T, Args...> {
+            m_inner.try_emplace(std::forward<Args>(args)...);
+        }
+
+        /**
         * @brief Pop and return the next item from the queue.
         * @return The next available item.
-        * @note Blocks (spins) until an item becomes available.
+        * @note Blocks until an item becomes available.
         */
         [[nodiscard]] T pop() noexcept(std::is_nothrow_move_assignable_v<T>) { return m_inner.pop(); }
 
         /**
         * @brief Pop and write the next item from the queue to the provided reference.
         * @return @param item Reference to receive the next available item.
-        * @note Blocks (spins) until an item becomes available.
+        * @note Blocks until an item becomes available.
         */
         void pop(T& item) noexcept(std::is_nothrow_move_assignable_v<T>) { m_inner.pop(item); }
 
@@ -231,15 +237,13 @@ namespace thunder::spsc {
         /**
         * @brief Try to pop an item from the queue without blocking.
         * @param item Reference to receive the item if available
-        * @return true if an was available and written into item, otherwise false.
-        * @note item is only written too if the function returns true.
+        * @return true if an item was available and written into the output reference, otherwise false.
+        * @note the item reference is only written too if the function returns true.
         */
         [[nodiscard]] bool try_pop(T& item) noexcept(std::is_nothrow_copy_assignable_v<T>) { return m_inner.try_pop(item); }
 
         /**
         * @brief Returns current size (approximate, due to concurrency).
-        *
-        * Computes the difference between the writeIndex and readIndex.
         *
         * @return The number of elements logically in the deque
         */
@@ -282,11 +286,9 @@ namespace thunder::spsc {
             {}
 
             /**
-            * @brief Producer-side push by perfect-forwarding.
+            * @brief Pushes an item into the queue.
             *
-            * Writes the item into the queue, then publishes the item to the producer with a release-store to \c writeIndex.
-            * Spins if the queue is full; when full, refreshes the cached \c readIndex with an acquire
-            * load to observe the consumer’s progress.
+            * Spins if the queue is full
             *
             * @tparam U   Any type that can be forwarded into a \c T \c
             * @param item item to push.
@@ -295,7 +297,7 @@ namespace thunder::spsc {
             void push(U&& item) {
                 //a relaxed load is fine here because the producer is the only writer of writeIndex
                 const auto writeIndex = m_queue->m_writer.writeIndex.load(std::memory_order_relaxed);
-                const auto nextWriteIndex = (writeIndex == m_queue->buffer_storage::capacity - 1) ? 0 : writeIndex + 1;
+                const auto nextWriteIndex = writeIndex == m_queue->buffer_storage::capacity - 1 ? 0 : writeIndex + 1;
 
                 // If the buffer is full, refresh our cached readIndex by loading the consumer's readIndex.
                 // We need acquire ordering here so that, once we observe the consumer’s release-store to readIndex,
@@ -322,8 +324,6 @@ namespace thunder::spsc {
                 m_queue->data()[writeIndex + m_queue->buffer_storage::padding] = std::forward<U>(item);
 
                 // Publish the new writeIndex to the consumer.
-                // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
-                // This guarantees the item/payload write happens-before the consumer sees the index advance.
                 m_queue->m_writer.writeIndex.store(nextWriteIndex, std::memory_order_release);
 
                 // unpark the consumer thread if it is currently parked.
@@ -332,14 +332,13 @@ namespace thunder::spsc {
             }
 
             /**
-            * @brief Producer-side nonblocking try_push by perfect-forwarding.
+            * @brief Tries to push an item into the queue.
             *
-            * Returns immediately if the queue is full after one acquire refresh of the cached
-            * \c readIndex. On success, publishes with a release-store to \c writeIndex.
+            * Returns immediately if the queue is full.
             *
             * @tparam U   Any type that can be forwarded into a \c T \c
             * @param item item to push.
-            * @return \c true on success; \c false if full.
+            * @return \c true on success, otherwise \c false.
             */
             template<class U>
             bool try_push(U&& item) {
@@ -365,16 +364,15 @@ namespace thunder::spsc {
                 m_queue->data()[writeIndex + m_queue->buffer_storage::padding] = std::forward<U>(item);
 
                 // Publish the new writeIndex to the consumer.
-                // The release store pairs with the consumer's acquire load of m_writer.writeIndex.
-                // This guarantees the item/payload write happens-before the consumer sees the index advance.
                 m_queue->m_writer.writeIndex.store(nextWriteIndex, std::memory_order_release);
                 return true;
             }
 
             /**
-            * @brief Producer-side in-place construction convenience.
+            * @brief In-place construct and push the item into the queue.
             * @tparam Args Constructor argument types for \c T.
-            * @param args  Arguments forwarded to construct a temporary \c T which is then pushed.
+            * @param args  Arguments forwarded to \c T's constructor.
+            * @note Blocks if the queue is full until space is available.
             */
             template<class... Args>
             void emplace(Args&&... args)
@@ -383,6 +381,12 @@ namespace thunder::spsc {
                 push(std::move(tmp));
             }
 
+            /**
+            * @brief In-place construct and tries to push the item into the queue.
+            * @tparam Args Constructor argument types for \c T.
+            * @param args  Arguments forwarded to \c T's constructor.
+            * @note Blocks if the queue is full until space is available.
+            */
             template<class... Args>
             [[nodiscard]] bool try_emplace(Args&&... args)
             requires std::constructible_from<T, Args...> {
@@ -391,18 +395,18 @@ namespace thunder::spsc {
             }
 
             /**
-             * @brief Consumer-side blocking pop.
+             * @brief Pops an item from the queue.
              *
              * Waits until an item is available, then removes it from the queue and
-             * returns it. Blocks (spins) while the queue appears empty,
+             * returns it. Blocks while the queue appears empty,
              *
-             * @return The next available item, moved from the queue.
+             * @return The next available item.
              */
             [[nodiscard]] T pop() {
                 // a relaxed load is fine here because the consumer is the only writer of readIndex
                 const auto readIndex = m_queue->m_reader.readIndex.load(std::memory_order_relaxed);
 
-                // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
+                // If we currently think the queue is empty, refresh the writeIndex
                 // by loading the producer’s writeIndex.
                 // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
                 if constexpr (WaitMode == wait_mode::busy_wait) {
@@ -426,8 +430,7 @@ namespace thunder::spsc {
                 T item = std::move(m_queue->data()[readIndex + m_queue->buffer_storage::padding]);
                 const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
-                // Release our consumption to the producer (who acquires readIndex when checking for space).
-                // This prevents the producer from overwriting the slot before our read happens-before.
+                // Release our consumption to the producer.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
 
                 // unpark the producer thread if it is currently parked.
@@ -437,12 +440,10 @@ namespace thunder::spsc {
             }
 
             /**
-             * @brief Consumer-side blocking pop into an output parameter.
+             * @brief Pops an item from the queue into an output parameter.
              *
              * Waits until an item is available, then removes it from the queue and
-             * assigns it to the provided reference. Blocks
-             * (spins) while the queue appears empty, refreshing the cached write
-             * index until new data arrives.
+             * assigns it to the provided reference. Blocks while the queue appears empty.
              *
              * @param item Reference to receive the next available item.
              */
@@ -450,7 +451,7 @@ namespace thunder::spsc {
                 // a relaxed load is fine here because the consumer is the only writer of readIndex
                 const auto readIndex = m_queue->m_reader.readIndex.load(std::memory_order_relaxed);
 
-                // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
+                // If we currently think the queue is empty, refresh the writeIndex
                 // by loading the producer’s writeIndex.
                 // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
                 if constexpr (WaitMode == wait_mode::busy_wait) {
@@ -474,8 +475,7 @@ namespace thunder::spsc {
                 item = m_queue->data()[readIndex + m_queue->buffer_storage::padding];
                 const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
-                // Release our consumption to the producer (who acquires readIndex when checking for space).
-                // This prevents the producer from overwriting the slot before our read happens-before.
+                // Release our consumption to the producer.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
 
                 // unpark the producer thread if it is currently parked.
@@ -484,20 +484,15 @@ namespace thunder::spsc {
             }
 
             /**
-             * @brief Consumer-side nonblocking try_pop.
-             *
-             * Returns immediately if the queue appears empty after one refresh
-             * of the cached write index. On success, moves the item from the queue
-             * into a newly constructed std::optional<T> and returns it.
-             *
-             * @return std::optional containing the item if available, otherwise empty.
+             * @brief Tries to pop an item from the queue.
+             * @return \c std::optional containing the item if available, otherwise \c std::nullopt.
              */
             [[nodiscard]] std::optional<T> try_pop() {
                 // a relaxed load is fine here because the consumer is the only writer of readIndex
                 const auto readIndex = m_queue->m_reader.readIndex.load(std::memory_order_relaxed);
 
                 if (readIndex == m_queue->m_reader.cachedWriteIndex) {
-                    // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
+                    // If we currently think the queue is empty, refresh the writeIndex
                     // by loading the producer’s writeIndex (our cached index could be out of date).
                     // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
                     m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
@@ -511,29 +506,22 @@ namespace thunder::spsc {
                 T item = std::move(m_queue->data()[readIndex + m_queue->buffer_storage::padding]);
                 const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
-                // Release our consumption to the producer (who acquires readIndex when checking for space).
-                // This prevents the producer from overwriting the slot before our read happens-before.
+                // Release our consumption to the producer.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
                 return item;
             }
 
             /**
-             * @brief Consumer-side nonblocking try_pop into an output parameter.
-             *
-             * Attempts to remove the next item from the queue and assign it to the
-             * provided reference. If the queue is empty after
-             * one refresh of the cached write index, leaves item unchanged and
-             * returns false.
-             *
+             * @brief Tries to pop an item from the queue into an output parameter.
              * @param item Reference to receive the item if available.
-             * @return true if an item was dequeued, false if the queue was empty.
+             * @return \c true if an item was popped, otherwise \c false.
              */
             [[nodiscard]] bool try_pop(T& item) {
                 // a relaxed load is fine here because the consumer is the only writer of readIndex
                 const auto readIndex = m_queue->m_reader.readIndex.load(std::memory_order_relaxed);
 
                 if (readIndex == m_queue->m_reader.cachedWriteIndex) {
-                    // If we currently think the queue is empty (based on our local cached writeIndex), refresh the writeIndex
+                    // If we currently think the queue is empty, refresh the writeIndex
                     // by loading the producer’s writeIndex (our cached index could be out of date).
                     // If we transition from "empty" to "not empty", acquire ordering on the load is needed to ensure we see the produced data.
                     m_queue->m_reader.cachedWriteIndex = m_queue->m_writer.writeIndex.load(std::memory_order_acquire);
@@ -547,8 +535,7 @@ namespace thunder::spsc {
                 item =  m_queue->data()[readIndex + m_queue->buffer_storage::padding];
                 const auto nextReadIndex = (readIndex == m_queue->buffer_storage::capacity - 1) ? 0 : readIndex + 1;
 
-                // Release our consumption to the producer (who acquires readIndex when checking for space).
-                // This prevents the producer from overwriting the slot before our read happens-before.
+                // Release our consumption to the producer.
                 m_queue->m_reader.readIndex.store(nextReadIndex, std::memory_order_release);
                 return true;
             }
