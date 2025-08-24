@@ -70,7 +70,7 @@ TEST_CASE("locked_ptr basic operators and move-only semantics", "[guard]") {
         REQUIRE((*lock).get() == 1);
         REQUIRE(std::addressof(lock.get()) == std::addressof(*lock));
 
-        // move the locked_ptr; lock is transferred, still exactly one lock held
+        // move the locked_ptr. lock is transferred, still exactly one lock held
         auto p2 = std::move(lock);
         REQUIRE(p2->inc() == 2);
     }
@@ -82,7 +82,7 @@ TEST_CASE("locked_ptr basic operators and move-only semantics", "[guard]") {
 TEST_CASE("locked_ptr exposes its lock object for advanced scenarios", "[guard]") {
     guard<int> guard;
     auto lock = guard.lock();
-    auto& lk = lock.lock();
+    auto& lk = lock.get_lock();
     STATIC_REQUIRE(std::same_as<std::remove_reference_t<decltype(lk)>, std::unique_lock<std::shared_mutex>>);
     REQUIRE(lk.owns_lock());
 }
@@ -117,7 +117,7 @@ TEST_CASE("move-construct transfers value", "[guard]") {
     REQUIRE(value == 7);
 }
 
-TEST_CASE("move-construct transfers value", "[guard]") {
+TEST_CASE("lock() provides exclusive, pointer-like write access", "[guard]") {
     guard<std::vector<int>> guard1;
     guard1.lock()->push_back(1);
 }
