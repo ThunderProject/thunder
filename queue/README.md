@@ -61,6 +61,6 @@ If <b>high throughput<b> or <b>low latency<b> is critical for your application, 
 
 ## Conclusion
 * thunder::spsc::queue achieves the best throughput among all tested SPSC queues.
-* It offers latency on par with the fastest lock-free implementations, with a stable distribution and spikes.
+* It offers latency on par with the fastest lock-free implementations, with a stable distribution and no spikes.
 * Lock-based designs are not competitive in either throughput or latency.
 
