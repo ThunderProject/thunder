@@ -1,4 +1,7 @@
-# 📊 `spsc::queue` benchmark result:
+# 📊 `thunder::spsc::queue` Benchmark Results:
+thunder::spsc::queue is a lock-free single-producer/single-consumer (SPSC) queue designed for high-throughput, low-latency message passing.
+
+This document presents benchmarks comparing `thunder::spsc::queue` against well-established, widely used SPSC queue implementations, including those backed by major open-source projects and companies (e.g., Folly, Boost, moodycamel, rigtorp) as well as lock-based queue variants.
 
 ## Test system:
 * CPU: AMD Ryzen 9 7900X (12 cores / 24 threads) @ 4.70 GHz
@@ -9,30 +12,45 @@
   * L3 Unified: 32 MiB × 2
 
 ## Lock-Free SPSC Queue Throughput
-The benchmark compares `thunder::spsc::queue` against several well-established, widely used single-producer/single-consumer queue implementations, including those backed by major open-source projects and companies (e.g., Facebook/Meta’s Folly, Boost, moodycamel).
 
-Throughput is measured as operations per millisecond across varying message sizes.
+Throughput is measured as b>operations<b> per millisecond across varying message sizes.
 
 ![SPSC Queue Throughput](benchmark/spsc_throughput.svg)
 
-### Key findings:
-* `thunder::spsc::queue` consistently delivers top performance, outperforming all tested competitors at every message size.
-* Even the slowest lock-free implementation still significantly outperforms any lock-based alternative tested.
+### Observations:
+
+* `thunder::spsc::queue` consistently achieves the highest throughput at all message sizes.
+* At small to medium messages, `thunder::spsc::queue` can sustain ~670k ops/ms
 
 ## Lock-Based SPSC Queue Variants
 We also benchmarked coarse-grained and fine-grained locking strategies using both spinlocks and `std::mutex`.
 
 ![SPSC Queue Throughput](benchmark/spsc_throughput_mutex.svg)
 
+### Observations:
+* Even the best-performing lock-based queues are 10× slower than lock-free implementations.
+* Fine-grained spinlocks have the highest throughput among lock-based designs but remain far behind any lock-free queue.
+
 ## SPSC Queue Latency
 ### All queues
 ![SPSC Queue Throughput](benchmark/spsc_latency_all.svg)
 
-### Lock-free queues
+* Lock-based queues exhibit dramatically higher latency (e.g., coarse-grained std::mutex at ~700 ns).
+* Lock-free queues stay within ~38–42 ns.
+
+### Lock-free queues Only
 ![SPSC Queue Throughput](benchmark/spsc_latency_lockfree.svg)
+
+* All lock-free implementations show tight latency clustering.
+* `thunder::spsc::queue` is within ~2 ns of the fastest competitor.
 
 ### thunder::spsc latency distribution
 ![SPSC Queue Throughput](benchmark/spsc_latency_distribution.svg)
+
+* Mean latency: 41.7 ns
+* Median (p50): 50 ns
+* Tail latency (p99.9): 80 ns
+* Distribution is narrow and predictable, making the queue suitable for latency-sensitive applications.
 
 ## Interpreting The Results
 Benchmarking concurrent data structures is inherently challenging:
@@ -42,4 +60,7 @@ Benchmarking concurrent data structures is inherently challenging:
 If <b>high throughput<b> or <b>low latency<b> is critical for your application, you should benchmark on your own systems with representative workloads to make an informed choice.
 
 ## Conclusion
+* thunder::spsc::queue achieves the best throughput among all tested SPSC queues.
+* It offers latency on par with the fastest lock-free implementations, with a stable distribution and spikes.
+* Lock-based designs are not competitive in either throughput or latency.
 
