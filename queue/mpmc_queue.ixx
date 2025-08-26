@@ -49,8 +49,9 @@ namespace thunder::mpmc {
             }
         }
 
-        [[nodiscard]] auto get_value() {
-           return data;
+        [[nodiscard]] auto get_value() noexcept(std::is_nothrow_move_constructible_v<T> || std::is_nothrow_copy_constructible_v<T>)
+        requires (std::is_move_constructible_v<T> || std::is_copy_constructible_v<T>) {
+           return std::move_if_noexcept(data);
         }
 
         [[nodiscard]] std::size_t load_sequence(const std::memory_order order) const noexcept {
@@ -140,24 +141,25 @@ namespace thunder::mpmc {
             // because it prevents cell.set_value(...) from being hoisted/reordered before this load.
             // If we used std::memory_order_relaxed, cell.set_value(...) could be reordered above this
             // load and thus introduce a potential write into a slot still owned by the consumer -> data race/UB
-            while(sequence != cell.load_sequence(std::memory_order_relaxed)) {
+            backoff bo;
+            while(sequence != cell.load_sequence(std::memory_order_acquire)) {
                 if constexpr (WaitMode == spinlock_wait_mode::busy_wait) {
                     hint::spin_loop();
                 }
                 else {
-                    m_backoff.spin();
+                    bo.spin();
                 }
             }
 
             cell.set_value(std::forward<Args>(args)...);
 
-            // publish the value; release pairs with the consumer's acquire (publish → consume)
+            // publish the value. release pairs with the consumer's acquire (publish → consume)
             // std::memory_order_release is needed here so that cell.set_value(...) is not reordered after this store.
             cell.store_sequence(sequence + 1, std::memory_order_release);
         }
 
-        T pop() noexcept {
-            // Relaxed order here is fine: head is just a ticket counter.
+        [[nodiscard]] T pop() noexcept(std::is_nothrow_move_constructible_v<T> || std::is_nothrow_copy_constructible_v<T>) {
+            // Relaxed order here is fine: tail is just a ticket counter.
             // Ordering is enforced via cell.load_sequence() and cell.store_sequence()
             const auto tail = m_tail.fetch_add(1, std::memory_order_relaxed);
 
@@ -183,19 +185,26 @@ namespace thunder::mpmc {
             }
 
             auto& cell = m_buffer[index];
-            const auto sequence = cycle(tail) * 2 + 1;
+            const auto sequence = cycle * 2 + 1;
 
+            // Wait until the slot has been filled. std::memory_order_acquire establish a happens-before relationship
+            // with the producer's release (publish → consume)
+            backoff bo;
             while (sequence != cell.load_sequence(std::memory_order_acquire)) {
                 if constexpr (WaitMode == spinlock_wait_mode::busy_wait) {
                     hint::spin_loop();
                 }
                 else {
-                    m_backoff.spin();
+                    bo.spin();
                 }
             }
 
+            // safe to read payload after the acquire above
             auto val = cell.get_value();
 
+            // mark the slot as free. std::memory_order_release is needed to prevent that cell.get_value()
+            // is reordered below this store. std::memory_order_release also established a happens-before relationship
+            // with the producers acquire
             cell.store_sequence(sequence + 1, std::memory_order_release);
             return val;
         }
@@ -203,14 +212,12 @@ namespace thunder::mpmc {
         std::size_t m_capacity;
         [[no_unique_address]] Allocator m_allocator;
 
-        alignas(std::hardware_destructive_interference_size) std::atomic<std::size_t> m_tail{0};
-        alignas(std::hardware_destructive_interference_size) std::atomic<std::size_t> m_head{0};
-
         cell<T>* m_buffer{};
-        backoff m_backoff{};
-
         const bool m_capacityIsPowerOfTwo;
         const std::size_t m_mask{}; //only used if capacity is a power of two
         const std::size_t m_shift{}; //only used if capacity is a power of two
+
+        alignas(std::hardware_destructive_interference_size) std::atomic<std::size_t> m_tail{0};
+        alignas(std::hardware_destructive_interference_size) std::atomic<std::size_t> m_head{0};
     };
 }
