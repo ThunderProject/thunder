@@ -208,7 +208,7 @@ namespace thunder::mpmc {
             return val;
         }
 
-        [[nodiscard]] std::optional<T> try_pop() noexcept(std::is_nothrow_move_constructible_v<T> || std::is_nothrow_copy_constructible_v<T>) {
+        [[nodiscard]] std::optional<T> try_pop() noexcept {
             auto& tail = m_ticket_dispenser.tail();
             auto expected = tail.load(std::memory_order_relaxed);
 
@@ -228,6 +228,31 @@ namespace thunder::mpmc {
                     const auto prev = std::exchange(expected, tail.load(std::memory_order_relaxed));
                     if (expected == prev) {
                         return std::nullopt;
+                    }
+                }
+            }
+        }
+
+        [[nodiscard]] bool try_pop(T& out) noexcept {
+            auto& tail = m_ticket_dispenser.tail();
+            auto expected = tail.load(std::memory_order_relaxed);
+
+            while (true) {
+                const auto [index, cycle] = m_ticket_dispenser.compute_ticket(expected);
+                auto& cell = m_buffer[index];
+                const auto sequence = cycle * 2 + 1;
+
+                if (sequence == cell.load_sequence(std::memory_order_acquire)) {
+                    if (tail.compare_exchange_strong(expected, expected + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                        out = cell.get_value();
+                        cell.store_sequence(sequence + 1, std::memory_order_release);
+                        return true;
+                    }
+                }
+                else {
+                    const auto prev = std::exchange(expected, tail.load(std::memory_order_relaxed));
+                    if (expected == prev) {
+                        return false;
                     }
                 }
             }
