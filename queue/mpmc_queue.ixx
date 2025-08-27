@@ -137,7 +137,6 @@ namespace thunder::mpmc {
     };
 
     export template<class T, spinlock_wait_mode WaitMode = spinlock_wait_mode::backoff_spin, class Allocator = std::allocator<cell<T>>>
-    requires (std::is_nothrow_copy_assignable_v<T> || std::is_nothrow_move_assignable_v<T>) && std::is_nothrow_destructible_v<T>
     class queue : unique {
     public:
         explicit queue(const std::size_t capacity, Allocator allocator = {})
@@ -166,9 +165,10 @@ namespace thunder::mpmc {
         }
 
         template<class U>
-        void push(U&& item) {
-            emplace(std::forward<U>(item));
-        }
+        void push(U&& item) noexcept { emplace(std::forward<U>(item)); }
+
+        template<class U>
+        [[nodiscard]] bool try_push(U&& item) noexcept { return try_emplace(std::forward<U>(item)); }
 
         template<class... Args>
         requires std::constructible_from<T, Args...> && std::is_nothrow_constructible_v<T, Args...>
@@ -187,6 +187,33 @@ namespace thunder::mpmc {
 
             // publish the value. std::memory_order_release prevents cell.set_value(...) from being reordered below this store.
             cell.store_sequence(sequence + 1, std::memory_order_release);
+        }
+
+        template<class... Args>
+        requires std::constructible_from<T, Args...> && std::is_nothrow_constructible_v<T, Args...>
+        [[nodiscard]] bool try_emplace(Args&&... args) noexcept {
+            auto& head = m_ticket_dispenser.head();
+            auto expected = head.load(std::memory_order_relaxed);
+
+            while (true) {
+                const auto [index, cycle] = m_ticket_dispenser.compute_ticket(expected);
+                auto& cell = m_buffer[index];
+                const auto sequence = cycle * 2;
+
+                if (sequence == cell.load_sequence(std::memory_order_acquire)) {
+                    if (head.compare_exchange_strong(expected, expected + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                        cell.set_value(std::forward<Args>(args)...);
+                        cell.store_sequence(sequence + 1, std::memory_order_release);
+                        return true;
+                    }
+                }
+                else {
+                    const auto prev = std::exchange(expected, head.load(std::memory_order_relaxed));
+                    if (expected == prev) {
+                        return false;
+                    }
+                }
+            }
         }
 
         [[nodiscard]] T pop() noexcept {
