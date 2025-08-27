@@ -235,6 +235,24 @@ namespace thunder::mpmc {
             return val;
         }
 
+        void pop(T& out) noexcept {
+            const auto [index, cycle] = m_ticket_dispenser.next_consumer();
+
+            auto& cell = m_buffer[index];
+            const auto sequence = cycle * 2 + 1;
+
+            // Wait until the slot has been filled.
+            // wait_for_sequence uses std::memory_order_acquire under the hood, which establishes
+            // a happens-before relationship with the producer's release (publish → consume)
+            wait_for_sequence(cell, sequence);
+
+            // safe to read payload after the acquire above
+            out = cell.get_value();
+
+            // mark the slot as free. std::memory_order_release prevents cell.get_value() from being reordered below this store.
+            cell.store_sequence(sequence + 1, std::memory_order_release);
+        }
+
         [[nodiscard]] std::optional<T> try_pop() noexcept {
             auto& tail = m_ticket_dispenser.tail();
             auto expected = tail.load(std::memory_order_relaxed);
