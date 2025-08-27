@@ -97,9 +97,6 @@ namespace thunder::mpmc {
             return compute_ticket(m_tail.fetch_add(1, std::memory_order_relaxed));
         }
 
-        [[nodiscard]] std::size_t load_producer() const noexcept { return m_head.load(std::memory_order_relaxed); }
-        [[nodiscard]] std::size_t load_consumer() const noexcept { return m_tail.load(std::memory_order_relaxed); }
-    private:
         [[nodiscard]] ticket compute_ticket(const std::size_t index) const noexcept {
             // m_pow2 never changes for the lifetime of the object, so this is a
             // perfectly predicted branch, and the cost is thus ~free
@@ -122,6 +119,13 @@ namespace thunder::mpmc {
                 .cycle = quotient
             };
         }
+
+        [[nodiscard]]std::atomic<std::size_t>& head() noexcept { return m_head; }
+        [[nodiscard]]std::atomic<std::size_t>& tail() noexcept { return m_tail; }
+
+        [[nodiscard]] std::size_t load_head() const noexcept { return m_head.load(std::memory_order_relaxed); }
+        [[nodiscard]] std::size_t load_tail() const noexcept { return m_tail.load(std::memory_order_relaxed); }
+    private:
 
         const std::size_t m_capacity;
         const bool m_pow2;
@@ -205,11 +209,33 @@ namespace thunder::mpmc {
         }
 
         [[nodiscard]] std::optional<T> try_pop() noexcept(std::is_nothrow_move_constructible_v<T> || std::is_nothrow_copy_constructible_v<T>) {
-            auto tail = m_tail.load(std::memory_order_relaxed);
+            auto& tail = m_ticket_dispenser.tail();
+            auto expected = tail.load(std::memory_order_relaxed);
+
+            while (true) {
+                const auto [index, cycle] = m_ticket_dispenser.compute_ticket(expected);
+                auto& cell = m_buffer[index];
+                const auto sequence = cycle * 2 + 1;
+
+                if (sequence == cell.load_sequence(std::memory_order_acquire)) {
+                    if (tail.compare_exchange_strong(expected, expected + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                        auto val = cell.get_value();
+                        cell.store_sequence(sequence + 1, std::memory_order_release);
+                        return val;
+                    }
+                }
+                else {
+                    const auto prev = std::exchange(expected, tail.load(std::memory_order_relaxed));
+                    if (expected == prev) {
+                        return std::nullopt;
+                    }
+                }
+            }
         }
 
-        [[nodiscard]] std::size_t size() const noexcept { return static_cast<ptrdiff_t>(m_ticket_dispenser.load_producer() - m_ticket_dispenser.load_consumer()); }
+        [[nodiscard]] std::size_t size() const noexcept { return static_cast<ptrdiff_t>(m_ticket_dispenser.load_head() - m_ticket_dispenser.load_tail()); }
         [[nodiscard]] std::size_t capacity() const noexcept { return m_capacity; }
+        [[nodiscard]] bool empty() const noexcept { return size() <= 0; }
     private:
         static inline void wait_for_sequence(cell<T>& cell, std::size_t expected) noexcept {
             // Wait until the cell's sequence equals `expected`.
@@ -231,8 +257,5 @@ namespace thunder::mpmc {
 
         cell<T>* m_buffer;
         ticker_dispenser m_ticket_dispenser;
-
-        alignas(std::hardware_destructive_interference_size) std::atomic<std::size_t> m_tail{0};
-        alignas(std::hardware_destructive_interference_size) std::atomic<std::size_t> m_head{0};
     };
 }
