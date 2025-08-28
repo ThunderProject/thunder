@@ -47,7 +47,7 @@ namespace thunder {
     /**
     * @brief A lock-free, concurrent work-stealing deque with configurable memory management.
     *
-    * This is a FIFO or LIFO queue that is owned by a single thread, but other threads may steal
+    * This is a FIFO or LIFO queue owned by a single thread, but other threads may steal
     * tasks from it.
     *
     * Only the owner thread is allowed to call `push()` and `pop()`. Multiple consumer threads
@@ -89,6 +89,7 @@ namespace thunder {
          * Concurrent_deque is non-copyable to avoid issues with shared ownership of the internal state.
          */
         concurrent_deque(const concurrent_deque& rhs) = delete;
+
         /**
          * @brief Copy assignment is deleted.
          *
@@ -119,37 +120,37 @@ namespace thunder {
         }
 
         /**
-         * @brief Returns the current capacity of the underlying ring buffer.
-         *
-         * @return The power-of-two capacity of the active buffer.
-         */
+        * @brief Returns the current capacity of the underlying ring buffer.
+        *
+        * @return The power-of-two capacity of the active buffer.
+        */
         [[nodiscard]] constexpr auto capacity() const noexcept {
             // Relaxed is safe here because we only need atomicity. Capacity is constant per buffer.
             return m_buffer.load(std::memory_order_relaxed)->capacity();
         }
 
         /**
-         * @brief Checks if the deque is empty (approximate).
-         *
-         * Based on relaxed reads; a result may be stale under concurrency.
-         *
-         * @return true if the deque appears empty; false otherwise.
-         */
+        * @brief Checks if the deque is empty (approximate).
+        *
+        * Based on relaxed reads; a result may be stale under concurrency.
+        *
+        * @return true if the deque appears empty; false otherwise.
+        */
         [[nodiscard]] bool empty() const noexcept {
             return size() == 0;
         }
 
         /**
-         * @brief Pushes an item onto the bottom of the deque.
-         *
-         * Adds a new element to the bottom of the queue. This method must be called only by the owning (producer) thread.
-         * Behavior on buffer full depends on the reclamation technique:
-         * - `bounded`: fails without modifying the buffer
-         * - `deferred`: attempts to resize; fails if allocation fails
-         *
-         * @param item The item to push.
-         * @return true if the item was successfully pushed; false if resizing failed.
-         */
+        * @brief Pushes an item onto the bottom of the deque.
+        *
+        * Adds a new element to the bottom of the queue. This method must be called only by the owning (producer) thread.
+        * Behavior on buffer full depends on the reclamation technique:
+        * - `bounded`: fails without modifying the buffer
+        * - `deferred`: attempts to resize; fails if allocation fails
+        *
+        * @param item The item to push.
+        * @return true if the item was successfully pushed; false if resizing failed.
+        */
         bool push(const T& item) noexcept {
             // std::memory_order_relaxed is enough because this load doesn't acquire anything from
             // another thread. m_bottom is only written in pop() which cannot be concurrent with push()
