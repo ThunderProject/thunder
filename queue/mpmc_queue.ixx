@@ -236,6 +236,7 @@ namespace thunder::mpmc {
         template<class... Args>
         requires std::constructible_from<T, Args...> && std::is_nothrow_constructible_v<T, Args...>
         [[nodiscard]] bool try_emplace(Args&&... args) noexcept {
+            // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
             auto& head = m_ticket_dispenser.head();
             auto expected = head.load(std::memory_order_relaxed);
 
@@ -244,14 +245,22 @@ namespace thunder::mpmc {
                 auto& cell = m_buffer[index];
                 const auto sequence = cycle * 2;
 
+                // std::memory_order_acquire prevents the write from being reordered above this load, and
+                // it establishes a happens-before relationship with any previous pops, so we know that the consumer is
+                // done reading at this index we will write too.
                 if (sequence == cell.load_sequence(std::memory_order_acquire)) {
+                    // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
                     if (head.compare_exchange_strong(expected, expected + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
                         cell.set_value(std::forward<Args>(args)...);
+
+                        // std::memory_order_release prevents the write to be reordered below this store, and
+                        // it establishes a happens-before relationship with later pop's/try_pop's
                         cell.store_sequence(sequence + 1, std::memory_order_release);
                         return true;
                     }
                 }
                 else {
+                    // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
                     const auto prev = std::exchange(expected, head.load(std::memory_order_relaxed));
                     if (expected == prev) {
                         return false;
@@ -312,6 +321,8 @@ namespace thunder::mpmc {
         * @return The item if available; otherwise \c std::nullopt.
         */
         [[nodiscard]] std::optional<T> try_pop() noexcept {
+            // Relaxed order here is fine: tail is just a ticket counter.
+            // Ordering is enforced by the cell object
             auto& tail = m_ticket_dispenser.tail();
             auto expected = tail.load(std::memory_order_relaxed);
 
@@ -320,14 +331,22 @@ namespace thunder::mpmc {
                 auto& cell = m_buffer[index];
                 const auto sequence = cycle * 2 + 1;
 
+                // std::memory_order_acquire prevents the read from being reordered above this load, and
+                // it establishes a happens-before relationship with any previous push, so we know that the producer is
+                // done writing to this index.
                 if (sequence == cell.load_sequence(std::memory_order_acquire)) {
+                    // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
                     if (tail.compare_exchange_strong(expected, expected + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
                         auto val = cell.get_value();
+
+                        // std::memory_order_release prevents the read to be reordered below this store, and
+                        // it establishes a happens-before relationship with later push/try_push
                         cell.store_sequence(sequence + 1, std::memory_order_release);
                         return val;
                     }
                 }
                 else {
+                    // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
                     const auto prev = std::exchange(expected, tail.load(std::memory_order_relaxed));
                     if (expected == prev) {
                         return std::nullopt;
@@ -343,6 +362,8 @@ namespace thunder::mpmc {
         * @note the item reference is only written too if the function returns true.
         */
         [[nodiscard]] bool try_pop(T& out) noexcept {
+            // Relaxed order here is fine: tail is just a ticket counter.
+            // Ordering is enforced by the cell object
             auto& tail = m_ticket_dispenser.tail();
             auto expected = tail.load(std::memory_order_relaxed);
 
@@ -351,14 +372,22 @@ namespace thunder::mpmc {
                 auto& cell = m_buffer[index];
                 const auto sequence = cycle * 2 + 1;
 
+                // std::memory_order_acquire prevents the read from being reordered above this load, and
+                // it establishes a happens-before relationship with any previous push, so we know that the producer is
+                // done writing to this index.
                 if (sequence == cell.load_sequence(std::memory_order_acquire)) {
+                    // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
                     if (tail.compare_exchange_strong(expected, expected + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
                         out = cell.get_value();
+
+                        // std::memory_order_release prevents the read to be reordered below this store, and
+                        // it establishes a happens-before relationship with later push/try_push
                         cell.store_sequence(sequence + 1, std::memory_order_release);
                         return true;
                     }
                 }
                 else {
+                    // Relaxed order here is fine: head is just a ticket counter. Ordering is enforced by the cell class
                     const auto prev = std::exchange(expected, tail.load(std::memory_order_relaxed));
                     if (expected == prev) {
                         return false;
