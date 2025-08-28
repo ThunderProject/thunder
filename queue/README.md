@@ -1,4 +1,4 @@
-# Project README
+# Lock Free Queues
 
 ## Table of Contents
 1. [mpmc_queue](#mpmc_queue)  
