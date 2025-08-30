@@ -8,6 +8,7 @@ module;
 #include <thread>
 #include <vector>
 #include <coroutine>
+#include <span>
 #include <libassert/assert.hpp>
 export module cpu_scheduler;
 
@@ -217,6 +218,7 @@ namespace thunder::cpu {
             m_threadReadyBarrier.wait();
 
             push_task(std::move(task));
+            wake_one_thread();
 
             return result;
         }
@@ -234,8 +236,14 @@ namespace thunder::cpu {
             else {
                 m_globalQueue.push(rawPtr);
             }
+        }
 
-            wake_one_thread();
+        template<class T>
+        void push_many(std::span<T> tasks) {
+            for (auto& task : tasks) {
+                push_task(std::move(task));
+            }
+            wake_n_threads(static_cast<uint32_t>(tasks.size()));
         }
 
         std::optional<task_type> steal_task() const noexcept {
@@ -289,6 +297,25 @@ namespace thunder::cpu {
             m_parkingLot[queueIndex]->park();
             m_sleeping.fetch_sub(1, std::memory_order_seq_cst);
             backoff.reset();
+        }
+
+        void wake_n_threads(uint32_t n) {
+            const auto cap = static_cast<uint32_t>(m_threads.size());
+            n = std::min(n, cap);
+
+            for (uint32_t i = 0; i < n; i++) {
+                if (m_sleeping.load(std::memory_order_seq_cst) == 0) {
+                     break;
+                }
+
+                if (const auto idx = m_sleepers.pop()) {
+                    DEBUG_ASSERT(m_parkingLot[idx.value()] != nullptr);
+                    m_parkingLot[idx.value()]->unpark();
+                }
+                else {
+                    break;
+                }
+            }
         }
 
         void wake_one_thread() {
