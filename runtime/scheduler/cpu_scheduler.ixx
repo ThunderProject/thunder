@@ -49,7 +49,7 @@ namespace thunder::cpu {
             m_head.store(pack(-1, 0), std::memory_order_relaxed);
         }
 
-        void push(const int index) noexcept {
+        void push(const int32_t index) noexcept {
             for (;;) {
                 // std::memory_order_relaxed is fine here. We just want the value, we don't
                 // consume any data that depends on prior writes from whoever set m_head.
@@ -70,7 +70,7 @@ namespace thunder::cpu {
             }
         }
 
-        std::optional<int> pop() noexcept {
+        std::optional<int32_t> pop() noexcept {
             for (;;) {
                 // std::memory_order_acquire is needed here because it pairs with the push() that stored this head.
                 // If we see a head that was released by push(), we also see that nodes ´next´ value.
@@ -96,10 +96,10 @@ namespace thunder::cpu {
             }
         }
     private:
-        static constexpr uint64_t pack(const int index, const uint32_t tag) noexcept {
+        static constexpr uint64_t pack(const int32_t index, const uint32_t tag) noexcept {
             return (static_cast<uint64_t>(tag) << 32) | static_cast<uint32_t>(index);
         }
-        static constexpr int unpack_index(const uint64_t node) noexcept { return static_cast<int>(static_cast<uint32_t>(node)); }
+        static constexpr int32_t unpack_index(const uint64_t node) noexcept { return static_cast<int>(static_cast<uint32_t>(node)); }
         static constexpr uint32_t unpack_tag(const uint64_t node) noexcept { return static_cast<uint32_t>(node >> 32); }
 
         std::vector<sleeper_node> nodes;
@@ -169,7 +169,7 @@ namespace thunder::cpu {
                 m_parkingLot.emplace_back(std::make_unique<thread_parker>());
             }
 
-            for (int i = 0; i < threadCount; i++) {
+            for (uint32_t i = 0; i < threadCount; i++) {
                 m_localQueues.push_back(std::make_unique<concurrent_deque<task_type>>());
                 m_threads.emplace_back([this, i](std::stop_token stopToken) {
                     this->worker(stopToken, i);
@@ -239,7 +239,7 @@ namespace thunder::cpu {
         }
 
         std::optional<task_type> steal_task() const noexcept {
-            for (int i = 0; i < m_localQueues.size(); i++) {
+            for (uint32_t i = 0; i < m_localQueues.size(); i++) {
                 const auto index = (m_localQueueIndex + i + 1) % m_localQueues.size();
 
                 DEBUG_ASSERT(m_localQueues[index] != nullptr);
@@ -284,7 +284,7 @@ namespace thunder::cpu {
             DEBUG_ASSERT(m_parkingLot[queueIndex] != nullptr);
 
             m_sleeping.fetch_add(1, std::memory_order_seq_cst);
-            m_sleepers.push(queueIndex);
+            m_sleepers.push(static_cast<int32_t>(queueIndex));
 
             m_parkingLot[queueIndex]->park();
             m_sleeping.fetch_sub(1, std::memory_order_seq_cst);
