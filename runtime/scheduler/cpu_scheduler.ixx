@@ -7,6 +7,7 @@ module;
 #include <optional>
 #include <thread>
 #include <vector>
+#include <coroutine>
 #include <libassert/assert.hpp>
 export module cpu_scheduler;
 
@@ -14,6 +15,7 @@ import concurrent_deque;
 import mpmc_queue;
 import thread_parker;
 import backoff;
+import coro;
 
 namespace thunder::cpu {
     struct sleeper_node {
@@ -109,6 +111,10 @@ namespace thunder::cpu {
     public:
         using task_handle = std::move_only_function<void()>;
         explicit task_wrapper(task_handle task) noexcept: m_task(std::move(task)) {}
+        explicit task_wrapper(std::coroutine_handle<> handle) noexcept : m_coroHandle(handle) {}
+
+        [[nodiscard]] bool is_coro() const noexcept { return m_coroHandle != nullptr; }
+        [[nodiscard]] auto get_coro_handle() const noexcept { return m_coroHandle; }
 
         void invoke() noexcept {
             try {
@@ -122,10 +128,30 @@ namespace thunder::cpu {
         }
     private:
         std::optional<task_handle> m_task;
+        std::coroutine_handle<> m_coroHandle{};
+    };
+
+    template<class T>
+    concept task_holder =
+    requires(T t) {
+        { static_cast<bool>(t) } -> std::convertible_to<bool>;
+        { t.value() };
     };
 
     export class scheduler {
     public:
+        struct awaiter {
+            scheduler* pool{nullptr};
+
+            static constexpr bool await_ready() noexcept { return false; }
+            static constexpr void await_resume() noexcept {}
+            void await_suspend(std::coroutine_handle<> handle) const noexcept {
+                if (handle && pool) {
+                    pool->push_task(handle);
+                }
+            }
+        };
+
         using task_type = task_wrapper*;
 
         explicit scheduler(const uint32_t threadCount = std::max(1u, std::thread::hardware_concurrency()))
@@ -194,6 +220,8 @@ namespace thunder::cpu {
 
             return result;
         }
+
+        auto sched() { return awaiter{this}; }
     private:
         template<class T>
         void push_task(T&& task) {
@@ -226,19 +254,30 @@ namespace thunder::cpu {
         [[nodiscard]] bool try_invoke_task() noexcept {
             DEBUG_ASSERT(m_localQueue != nullptr);
 
-            if (const auto task = m_localQueue->pop()) {
+            [[nodiscard]] auto try_invoke_from = []<task_holder T>(T task)  noexcept -> bool {
+                if (!task) {
+                    return false;
+                }
                 const std::unique_ptr<task_wrapper> owned(task.value());
-                owned->invoke();
+
+                if (owned->is_coro()) {
+                    coro::resume_guard _(owned->get_coro_handle());
+                }
+                else {
+                    owned->invoke();
+                }
+                return true;
+            };
+
+            if (try_invoke_from(m_localQueue->pop())) {
                 return true;
             }
-            if (const auto task = m_globalQueue.try_pop()) {
-                const std::unique_ptr<task_wrapper> owned(task.value());
-                owned->invoke();
+
+            if (try_invoke_from(m_globalQueue.try_pop())) {
                 return true;
             }
-            if (const auto task = steal_task()) {
-                std::unique_ptr<task_wrapper> const owned(task.value());
-                owned->invoke();
+
+            if (try_invoke_from(steal_task())) {
                 return true;
             }
             return false;
