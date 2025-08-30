@@ -20,6 +20,11 @@ namespace thunder::cpu {
         sleeper_node(const sleeper_node&) = delete;
         sleeper_node& operator=(const sleeper_node&) = delete;
 
+        // We need these move constructors to store sleeper_node in a vector.
+        // A std::vector<T> requires 'T' to be move-constructible when it grows/reallocates.
+        // std::vector<sleeper_node>::resize(threadCount) is used when constructing the scheduler
+        // which only works if sleeper_node is movable. This is fine as long as we’re not concurrently
+        // accessing nodes while the vector is reallocating, which can never happen with the current implementation.
         sleeper_node(sleeper_node&& other) noexcept {
             next.store(other.next.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
@@ -27,6 +32,7 @@ namespace thunder::cpu {
             next.store(other.next.load(std::memory_order_relaxed), std::memory_order_relaxed);
             return *this;
         }
+        ~sleeper_node() = default;
 
         std::atomic_int next{-1};
     };
@@ -35,19 +41,27 @@ namespace thunder::cpu {
     public:
         explicit sleeper_stack(const size_t capacity) {
             nodes.resize(capacity);
+
+            // std::memory_order_relaxed is fine here. The object is not shared/published yet.
             m_head.store(pack(-1, 0), std::memory_order_relaxed);
         }
 
-        void push(const int index) {
+        void push(const int index) noexcept {
             for (;;) {
-                auto head = m_head.load(std::memory_order_acquire);
+                // std::memory_order_relaxed is fine here. We just want the value, we don't
+                // consume any data that depends on prior writes from whoever set m_head.
+                auto head = m_head.load(std::memory_order_relaxed);
 
                 const auto oldIndex = unpack_index(head);
                 const auto tag = unpack_tag(head);
 
+                // std::memory_order_relaxed is fine here. The write is not published yet so no ordering is needed here.
                 nodes[index].next.store(oldIndex, std::memory_order_relaxed);
 
-                if (m_head.compare_exchange_weak(head, pack(index, tag + 1), std::memory_order_acq_rel, std::memory_order_acquire)) {
+                // If the CAS succeeds, we need std::memory_order_release to establish a happens-before relationship
+                // with any subsequent pop's (i.e., we publish/release the nodes[index].next.store() write).
+                // On failure std::memory_order_relaxed is fine because we will just retry the loop.
+                if (m_head.compare_exchange_weak(head, pack(index, tag + 1), std::memory_order_release, std::memory_order_relaxed)) {
                     return;
                 }
             }
@@ -55,6 +69,8 @@ namespace thunder::cpu {
 
         std::optional<int> pop() noexcept {
             for (;;) {
+                // std::memory_order_acquire is needed here because it pairs with the push() that stored this head.
+                // If we see a head that was released by push(), we also see that nodes ´next´ value.
                 auto head = m_head.load(std::memory_order_acquire);
 
                 const auto index = unpack_index(head);
@@ -64,9 +80,14 @@ namespace thunder::cpu {
                 }
 
                 const auto tag = unpack_tag(head);
+
+                // std::memory_order_relaxed here is fine because of the acquire load of head above.
                 const auto next = nodes[index].next.load(std::memory_order_relaxed);
 
-                if (m_head.compare_exchange_weak(head, pack(next, tag + 1), std::memory_order_acq_rel, std::memory_order_acquire)) {
+                // std::memory_order_relaxed is fine for the success order. We do not publish any new writes here.
+                // std::memory_order_relaxed is also fine for the failure order, because we loop again and retry with a new
+                // aquire load of m_head.
+                if (m_head.compare_exchange_weak(head, pack(next, tag + 1), std::memory_order_relaxed, std::memory_order_relaxed)) {
                     return index;
                 }
             }
@@ -129,10 +150,18 @@ namespace thunder::cpu {
         }
         scheduler(const scheduler&) = delete;
         scheduler& operator=(const scheduler&) = delete;
-        ~scheduler() {
+        ~scheduler() noexcept {
             for (auto& thread : m_threads) {
                 thread.request_stop();
             }
+            for (size_t i = 0; i < m_threads.size(); i++) {
+                m_parkingLot[i]->unpark();
+            }
+        }
+
+        [[nodiscard]] static scheduler& global(const uint32_t threadCount = std::thread::hardware_concurrency()) noexcept {
+            static scheduler globalInstance(threadCount);
+            return globalInstance;
         }
 
         template<class Fnc, class... Args>
@@ -165,7 +194,7 @@ namespace thunder::cpu {
             wake_one_thread();
         }
 
-        std::optional<task_type> steal_task() const {
+        std::optional<task_type> steal_task() const noexcept {
             for (int i = 0; i < m_localQueues.size(); i++) {
                 const auto index = (m_localQueueIndex + i + 1) % m_localQueues.size();
 
@@ -176,7 +205,7 @@ namespace thunder::cpu {
             return std::nullopt;
         }
 
-        [[nodiscard]] bool try_invoke_task() {
+        [[nodiscard]] bool try_invoke_task() noexcept {
             if (const auto task = m_localQueue->pop()) {
                 const std::unique_ptr<task_wrapper> owned(task.value());
                 owned->invoke();
@@ -205,6 +234,10 @@ namespace thunder::cpu {
         }
 
         void wake_one_thread() {
+            if (m_localQueue) {
+                return;
+            }
+
             if (m_sleeping.load(std::memory_order_seq_cst) > 0) {
                 if (const auto idx = m_sleepers.pop()) {
                     m_parkingLot[idx.value()]->unpark();
