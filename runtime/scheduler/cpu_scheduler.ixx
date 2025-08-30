@@ -7,6 +7,7 @@ module;
 #include <optional>
 #include <thread>
 #include <vector>
+#include <libassert/assert.hpp>
 export module cpu_scheduler;
 
 import concurrent_deque;
@@ -127,12 +128,14 @@ namespace thunder::cpu {
     public:
         using task_type = task_wrapper*;
 
-        explicit scheduler(const uint32_t threadCount = std::thread::hardware_concurrency())
+        explicit scheduler(const uint32_t threadCount = std::max(1u, std::thread::hardware_concurrency()))
             :
             m_globalQueue(1024),
             m_threadReadyBarrier(threadCount),
             m_sleepers(threadCount)
         {
+            DEBUG_ASSERT(threadCount > 0);
+
             m_localQueues.reserve(threadCount);
             m_threads.reserve(threadCount);
             m_parkingLot.reserve(threadCount);
@@ -156,6 +159,19 @@ namespace thunder::cpu {
             }
             for (size_t i = 0; i < m_threads.size(); i++) {
                 m_parkingLot[i]->unpark();
+            }
+
+            for (auto& thread : m_threads) {
+                thread.join();
+            }
+
+            while (auto task = m_globalQueue.try_pop()) {
+                delete task.value();
+            }
+            for (const auto& queue : m_localQueues) {
+                while (auto task = queue->pop()) {
+                    delete task.value();
+                }
             }
         }
 
@@ -198,6 +214,8 @@ namespace thunder::cpu {
             for (int i = 0; i < m_localQueues.size(); i++) {
                 const auto index = (m_localQueueIndex + i + 1) % m_localQueues.size();
 
+                DEBUG_ASSERT(m_localQueues[index] != nullptr);
+
                 if (auto task = m_localQueues[index]->steal()) {
                     return task.value();
                 }
@@ -206,6 +224,8 @@ namespace thunder::cpu {
         }
 
         [[nodiscard]] bool try_invoke_task() noexcept {
+            DEBUG_ASSERT(m_localQueue != nullptr);
+
             if (const auto task = m_localQueue->pop()) {
                 const std::unique_ptr<task_wrapper> owned(task.value());
                 owned->invoke();
@@ -225,6 +245,9 @@ namespace thunder::cpu {
         }
 
         void park_thread(const uint32_t queueIndex, backoff& backoff) {
+            DEBUG_ASSERT(queueIndex < m_parkingLot.size());
+            DEBUG_ASSERT(m_parkingLot[queueIndex] != nullptr);
+
             m_sleeping.fetch_add(1, std::memory_order_seq_cst);
             m_sleepers.push(queueIndex);
 
@@ -234,18 +257,19 @@ namespace thunder::cpu {
         }
 
         void wake_one_thread() {
-            if (m_localQueue) {
-                return;
-            }
-
             if (m_sleeping.load(std::memory_order_seq_cst) > 0) {
                 if (const auto idx = m_sleepers.pop()) {
+                    DEBUG_ASSERT(m_parkingLot[idx.value()] != nullptr);
+
                     m_parkingLot[idx.value()]->unpark();
                 }
             }
         }
 
         void worker(std::stop_token stopToken, uint32_t queueIndex) {
+            DEBUG_ASSERT(queueIndex < m_localQueues.size());
+            DEBUG_ASSERT(m_localQueues[queueIndex] != nullptr);
+
             m_localQueueIndex = queueIndex;
             m_localQueue = m_localQueues[queueIndex].get();
             m_threadReadyBarrier.count_down();
