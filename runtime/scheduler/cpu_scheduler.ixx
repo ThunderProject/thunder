@@ -106,7 +106,6 @@ namespace thunder::cpu {
         std::atomic<uint64_t> m_head{ pack(-1, 0) };
     };
 
-
     class task_wrapper {
     public:
         using task_handle = std::move_only_function<void()>;
@@ -259,13 +258,9 @@ namespace thunder::cpu {
                     return false;
                 }
                 const std::unique_ptr<task_wrapper> owned(task.value());
-
-                if (owned->is_coro()) {
-                    coro::resume_guard _(owned->get_coro_handle());
-                }
-                else {
-                    owned->invoke();
-                }
+                owned->is_coro()
+                    ? owned->get_coro_handle().resume()
+                    : owned->invoke();
                 return true;
             };
 

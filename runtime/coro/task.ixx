@@ -1,6 +1,7 @@
 module;
 #include <coroutine>
 #include <exception>
+#include <utility>
 export module task;
 
 import completion_event;
@@ -33,7 +34,16 @@ namespace thunder::coro {
 
                 auto await_resume() noexcept {
                     if constexpr (!std::is_void_v<T>) {
-                        return m_coroHandle.promise().value;
+                        auto& promise = m_coroHandle.promise();
+                        auto returnValue = std::move(promise.value);
+
+                        auto ownedHandle = std::exchange(m_coroHandle, nullptr);
+                        ownedHandle.destroy();
+                        return returnValue;
+                    }
+                    else {
+                        auto ownedHandle = std::exchange(m_coroHandle, nullptr);
+                        ownedHandle.destroy();
                     }
                 }
 
