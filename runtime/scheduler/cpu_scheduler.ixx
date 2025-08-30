@@ -193,6 +193,7 @@ namespace thunder::cpu {
             while (auto task = m_globalQueue.try_pop()) {
                 delete task.value();
             }
+
             for (const auto& queue : m_localQueues) {
                 while (auto task = queue->pop()) {
                     delete task.value();
