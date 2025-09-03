@@ -118,7 +118,10 @@ namespace thunder::cpu {
 
         void invoke() noexcept {
             try {
-                if (m_task) {
+                if (m_coroHandle) {
+                    m_coroHandle.resume();
+                }
+                else if (m_task) {
                     (*m_task)();
                 }
             }
@@ -217,8 +220,7 @@ namespace thunder::cpu {
             // wait for workers to become ready before we start pushing tasks into the pool
             m_threadReadyBarrier.wait();
 
-            push_task(std::move(task));
-            wake_one_thread();
+            push_one(std::move(task));
 
             return result;
         }
@@ -236,6 +238,12 @@ namespace thunder::cpu {
             else {
                 m_globalQueue.push(rawPtr);
             }
+        }
+
+        template<class T>
+        void push_one(T&& task) {
+            push_task(std::forward<T>(task));
+            wake_one_thread();
         }
 
         template<class T>
@@ -266,10 +274,9 @@ namespace thunder::cpu {
                 if (!task) {
                     return false;
                 }
+
                 const std::unique_ptr<task_wrapper> owned(task.value());
-                owned->is_coro()
-                    ? owned->get_coro_handle().resume()
-                    : owned->invoke();
+                owned->invoke();
                 return true;
             };
 
