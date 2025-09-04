@@ -20,25 +20,7 @@ import coro;
 
 namespace thunder::cpu {
     struct sleeper_node {
-        sleeper_node() = default;
-        sleeper_node(const sleeper_node&) = delete;
-        sleeper_node& operator=(const sleeper_node&) = delete;
-
-        // We need these move constructors to store sleeper_node in a vector.
-        // A std::vector<T> requires 'T' to be move-constructible when it grows/reallocates.
-        // std::vector<sleeper_node>::resize(threadCount) is used when constructing the scheduler
-        // which only works if sleeper_node is movable. This is fine as long as we’re not concurrently
-        // accessing nodes while the vector is reallocating, which can never happen with the current implementation.
-        sleeper_node(sleeper_node&& other) noexcept {
-            next.store(other.next.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        }
-        sleeper_node& operator=(sleeper_node&& other) noexcept {
-            next.store(other.next.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            return *this;
-        }
-        ~sleeper_node() = default;
-
-        std::atomic_int next{-1};
+        std::int32_t next{-1};
     };
 
     class sleeper_stack {
@@ -59,8 +41,7 @@ namespace thunder::cpu {
                 const auto oldIndex = unpack_index(head);
                 const auto tag = unpack_tag(head);
 
-                // std::memory_order_relaxed is fine here. The write is not published yet so no ordering is needed here.
-                nodes[index].next.store(oldIndex, std::memory_order_relaxed);
+                nodes[index].next = oldIndex;
 
                 // If the CAS succeeds, we need std::memory_order_release to establish a happens-before relationship
                 // with any subsequent pop's (i.e., we publish/release the nodes[index].next.store() write).
@@ -85,8 +66,7 @@ namespace thunder::cpu {
 
                 const auto tag = unpack_tag(head);
 
-                // std::memory_order_relaxed here is fine because of the acquire load of head above.
-                const auto next = nodes[index].next.load(std::memory_order_relaxed);
+                const auto next = nodes[index].next;
 
                 // std::memory_order_relaxed is fine for the success order. We do not publish any new writes here.
                 // std::memory_order_relaxed is also fine for the failure order, because we loop again and retry with a new
