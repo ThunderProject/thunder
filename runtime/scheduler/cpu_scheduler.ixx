@@ -33,6 +33,8 @@ namespace thunder::cpu {
         }
 
         void push(const int32_t index) noexcept {
+            DEBUG_ASSERT(index >= 0 && index < static_cast<int32_t>(nodes.size()));
+
             for (;;) {
                 // std::memory_order_relaxed is fine here. We just want the value, we don't
                 // consume any data that depends on prior writes from whoever set m_head.
@@ -63,6 +65,8 @@ namespace thunder::cpu {
                 if (index == -1) {
                     return std::nullopt;
                 }
+
+                DEBUG_ASSERT(index < static_cast<int32_t>(nodes.size()));
 
                 const auto tag = unpack_tag(head);
 
