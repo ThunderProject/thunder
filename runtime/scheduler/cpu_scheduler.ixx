@@ -1,4 +1,11 @@
 module;
+//windows.h is such a stupid header
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#define STRICT
+#define UNICODE
+
+#include <windows.h>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -9,6 +16,7 @@ module;
 #include <vector>
 #include <coroutine>
 #include <span>
+#include <chrono>
 #include <libassert/assert.hpp>
 export module cpu_scheduler;
 
@@ -18,7 +26,111 @@ import thread_parker;
 import backoff;
 import coro;
 
+using namespace std::chrono_literals;
+
 namespace thunder::cpu {
+
+    class thunder_thread {
+    public:
+        using id = std::jthread::id;
+        using native_handle_type = std::jthread::native_handle_type;
+
+        thunder_thread() noexcept = default;
+
+        template <class Fn, class... Args>
+        requires (!std::is_same_v<std::remove_cvref_t<Fn>, thunder_thread>)
+        [[nodiscard]] explicit thunder_thread(Fn&& fn, Args&&... args)
+            :
+            m_thread(std::forward<Fn>(fn), std::forward<Args>(args)...)
+        {}
+
+        ~thunder_thread() { try_cancel_and_join(); }
+
+        thunder_thread(const thunder_thread&) = delete;
+        thunder_thread(thunder_thread&&) noexcept = default;
+        thunder_thread& operator=(const thunder_thread&) = delete;
+
+        thunder_thread& operator=(thunder_thread&& rhs) noexcept {
+            if (this == std::addressof(rhs)) {
+                return *this;
+            }
+
+            try_cancel_and_join();
+            m_thread = std::move(rhs.m_thread);
+            return *this;
+        }
+
+        void swap(thunder_thread& rhs) noexcept { m_thread.swap(rhs.m_thread); }
+        [[nodiscard]] bool joinable() const noexcept { return m_thread.joinable(); }
+        void join() { m_thread.join(); }
+        void detach() { m_thread.detach(); }
+        [[nodiscard]] id get_id() const noexcept { return m_thread.get_id(); }
+        [[nodiscard]] native_handle_type native_handle() noexcept { return m_thread.native_handle(); }
+        [[nodiscard]] std::stop_source get_stop_source() noexcept { return m_thread.get_stop_source(); }
+        [[nodiscard]] std::stop_token get_stop_token() const noexcept { return m_thread.get_stop_token(); }
+        bool request_stop() noexcept { return m_thread.request_stop(); }
+
+        void set_thread_name(const std::string_view name) noexcept {
+#ifdef _WIN32
+            const auto length = MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
+            if (length > 0) {
+                std::wstring wideName(length, L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wideName.data(), length);
+                [[maybe_unused]] auto result = SetThreadDescription(m_thread.native_handle(), wideName.c_str());
+            }
+#endif
+        }
+
+        friend void swap(thunder_thread& lhs, thunder_thread& rhs) noexcept {
+            lhs.m_thread.swap(rhs.m_thread);
+        }
+
+        [[nodiscard]] static unsigned int hardware_concurrency() noexcept { return std::thread::hardware_concurrency(); }
+    private:
+        void try_cancel_and_join() noexcept {
+            if (m_thread.joinable()) {
+                m_thread.request_stop();
+                m_thread.join();
+            }
+        }
+        std::jthread m_thread;
+    };
+
+    constexpr auto target_global_queue_interval = static_cast<double>(200ns .count());
+    constexpr auto target_tasks_polled_per_global_queue_interval = 61.0;
+    constexpr auto task_poll_time_ewma_alpha = 0.1;
+
+    struct worker_stats {
+        double task_poll_time_ewma = target_global_queue_interval / target_tasks_polled_per_global_queue_interval;
+        uint64_t batch_start = 0;
+        uint32_t tasks_polled_in_batch = 0;
+    };
+
+    static thread_local worker_stats wstats;
+
+    inline uint64_t now_ns() noexcept {
+        using namespace std::chrono;
+        return std::chrono::duration_cast<nanoseconds>(high_resolution_clock::now().time_since_epoch()).count();
+    }
+
+    void start_processing_scheduled_tasks() {
+        wstats.batch_start = now_ns();
+        wstats.tasks_polled_in_batch = 0;
+    }
+
+    void end_processing_scheduled_tasks() {
+        if (wstats.tasks_polled_in_batch > 0) {
+            const auto now = now_ns();
+
+            const auto elapsed = now - wstats.batch_start;
+            const auto numPolls = static_cast<double>(wstats.tasks_polled_in_batch);
+
+            const auto meanPollDuration = elapsed / numPolls;
+            const double weighted_alpha  = 1.0 - std::pow(1.0 - task_poll_time_ewma_alpha, numPolls);
+            wstats.task_poll_time_ewma = weighted_alpha * meanPollDuration + (1.0 - weighted_alpha) * wstats.task_poll_time_ewma;
+        }
+    }
+
     struct sleeper_node {
         std::int32_t next{-1};
     };
@@ -108,6 +220,7 @@ namespace thunder::cpu {
                 else if (m_task) {
                     (*m_task)();
                 }
+                std::unreachable();
             }
             catch ([[maybe_unused]] const std::exception& e) {
 
@@ -162,8 +275,11 @@ namespace thunder::cpu {
                 m_threads.emplace_back([this, i](std::stop_token stopToken) {
                     this->worker(stopToken, i);
                 });
+                std::string threadName = std::format("cpu_scheduler_worker_thread_{}", i);
+                m_threads[i].set_thread_name(threadName);
             }
         }
+
         scheduler(const scheduler&) = delete;
         scheduler& operator=(const scheduler&) = delete;
         ~scheduler() noexcept {
@@ -351,7 +467,7 @@ namespace thunder::cpu {
 
         static inline thread_local concurrent_deque<task_type>* m_localQueue = nullptr;
         static inline thread_local uint32_t m_localQueueIndex = 0;
-        std::vector<std::jthread> m_threads;
+        std::vector<thunder_thread> m_threads;
 
         std::vector<std::unique_ptr<thread_parker>> m_parkingLot;
         std::latch m_threadReadyBarrier;

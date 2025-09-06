@@ -2,6 +2,7 @@ module;
 #include <expected>
 #include <new>
 #include <atomic>
+#include <vector>
 
 export module concurrent_deque;
 import reclaimer;
@@ -263,6 +264,13 @@ namespace thunder {
             // The queue is empty from the stealing thread’s perspective.
             return std::unexpected{ StealFailureReason::EmptyQueue };
         }
+
+        std::expected<std::vector<T>, StealFailureReason> steal_batch(size_t batchSize) noexcept {
+            if (batchSize == 0) {
+                return {};
+            }
+        }
+
     private:
         /**
         * @brief Removes and returns an item from the bottom of the deque.

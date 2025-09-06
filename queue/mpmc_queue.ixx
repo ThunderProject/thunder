@@ -6,12 +6,15 @@ module;
 #include <thread>
 #include <bit>
 #include <optional>
+#include <algorithm>
 export module mpmc_queue;
 
 import backoff;
 import hints;
 
 namespace thunder::mpmc {
+    namespace rn = std::ranges;
+
     struct unique {
         unique() = default;
         ~unique() = default;
@@ -174,15 +177,18 @@ namespace thunder::mpmc {
             m_capacity = std::min(m_capacity,  std::numeric_limits<std::size_t>::max() -1);
 
             m_buffer = m_allocator.allocate(m_capacity + 1);
-            for (size_t i = 0; i < m_capacity; i++) {
-                std::construct_at(std::addressof(m_buffer[i]));
+
+            try {
+                rn::uninitialized_default_construct(m_buffer, m_buffer + m_capacity);
+            }
+            catch (...) {
+                m_allocator.deallocate(m_buffer, m_capacity + 1);
+                throw;
             }
         }
 
         ~queue() noexcept {
-            for (size_t i = 0; i < m_capacity; i++) {
-                std::destroy_at(std::addressof(m_buffer[i]));
-            }
+            rn::destroy(m_buffer, m_buffer + m_capacity);
             m_allocator.deallocate(m_buffer, m_capacity + 1);
         }
 
