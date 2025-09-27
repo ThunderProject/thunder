@@ -1,4 +1,5 @@
 target_sources(thunder
         PUBLIC
-        spsc_queue.h
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            spsc_queue.ixx
 )

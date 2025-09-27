@@ -2,6 +2,7 @@ module;
 #include <coroutine>
 #include <exception>
 #include <utility>
+#include <optional>
 export module task;
 
 import completion_event;
@@ -53,9 +54,6 @@ namespace thunder::coro {
             return awaiter{ m_coroHandle };
         }
 
-        auto result() noexcept requires(!std::is_void_v<T>) { return m_coroHandle.promise().value; }
-        void result() const noexcept requires(std::is_void_v<T>) {}
-
         void wait() {
             completion_event event;
             const auto waitTask = create_sync_wait_task();
@@ -64,11 +62,21 @@ namespace thunder::coro {
         }
 
         T get() requires(!std::is_void_v<T>) {
-            wait();
-            return result();
+            std::optional<T> out;
+
+            auto wrapper = [this, &out]() -> task<> {
+                out.emplace(co_await *this);
+                co_return;
+            }();
+
+            wrapper.wait();
+
+            return std::move(*out);
         }
 
         void get() requires(std::is_void_v<T>) { wait(); }
+
+        [[nodiscard]] std::coroutine_handle<promise_type> native_handle() const noexcept { return m_coroHandle; }
     private:
         sync_wait_task create_sync_wait_task() {
             co_await *this;

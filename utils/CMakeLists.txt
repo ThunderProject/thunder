@@ -1,4 +1,4 @@
 target_sources(thunder
         PUBLIC
-        hints.h
+        hints.ixx
 )
